@@ -276,32 +276,36 @@ fn bare_empty_list(existing: &str) -> bool {
     items.len() == 1 && items[0] == "[]"
 }
 
-/// 行级结构：`- insert:` 块 = 顶格 `- insert:` + 缩进的 `- id:` + `name:`。
-/// 判断某 `- insert:` 行是否构成与托管插件完全一致的单一条目。
-/// 要求该块恰好三行结束（下一行不存在/空行/顶格），避免误删带延续行的块。
+/// 行级结构：`- insert:` 块 = 顶格 `- insert:` + 缩进的 `- id:`（可带引号），
+/// 通常还有 `name:` 行。判断某 `- insert:` 行是否构成指向托管插件 id 的条目。
+/// 只按 `- id:` 判定（id 是插件唯一标识，重复 insert 同一 id 即冲突），
+/// name 写法（单/双引号、有无）不影响判定；块必须恰好 2~3 行结束
+/// （下一行不存在/空行/顶格），避免误删带多个条目的 insert 块。
 fn is_managed_dup_insert(lines: &[&str], at: usize) -> bool {
     let Some(first) = lines.get(at) else { return false };
     if first.trim() != "- insert:" {
         return false;
     }
-    // 下一行必须是 `    - id: <pkg.id>`，再下一行 `      name: '<pkg.name>'`。
-    let (Some(id_line), Some(name_line)) = (lines.get(at + 1), lines.get(at + 2)) else {
-        return false;
-    };
+    // 下一行必须是 `    - id: <pkg.id>`（id 值可能带单/双引号）。
+    let Some(id_line) = lines.get(at + 1) else { return false };
     let id_trim = id_line.trim();
-    let name_trim = name_line.trim();
-    if !id_trim.starts_with("- id:") || !name_trim.starts_with("name:") {
+    if !id_trim.starts_with("- id:") {
         return false;
     }
-    let id_val = id_trim["- id:".len()..].trim();
-    let name_val = name_trim["name:".len()..].trim().trim_matches('\'');
-    let matched = PKGS
-        .iter()
-        .any(|p| p.id == id_val && p.name == name_val);
+    let raw = id_trim["- id:".len()..].trim();
+    let id_val = raw.trim_matches('\'').trim_matches('"');
+    let matched = PKGS.iter().any(|p| p.id == id_val);
     if !matched {
         return false;
     }
-    // 块必须恰好三行：at+3 不存在、空行、或以非空白开头（下一个顶格条目）。
+    // at+2 可能是 `name:` 行（允许存在）；at+3 若存在且是缩进行 → 块内还有
+    // 更多条目（多条目 insert 块），不整体删除，保守保留。
+    if let Some(tail) = lines.get(at + 2) {
+        let t = tail.trim();
+        if !t.is_empty() && !t.starts_with("name:") {
+            return false;
+        }
+    }
     match lines.get(at + 3) {
         None => true,
         Some(next) => {
@@ -311,12 +315,11 @@ fn is_managed_dup_insert(lines: &[&str], at: usize) -> bool {
     }
 }
 
-/// 清理标记块外与托管插件完全一致的重复 insert 条目。
-/// 升级场景：旧版本把插件条目写在标记块外（用户手动安装 / 旧版同步残留），
-/// 新版本又通过标记块托管同一插件 → 同一插件被 insert 两次，DSH 加载时报错
-/// 或后加载覆盖前加载（表现为"插件配置被覆盖/消失"）。这里把标记块外与
-/// 托管插件 id+name 完全相同的条目删除（标记块内的托管版本是权威）。
-/// 只精确匹配托管插件自身，绝不触碰用户安装的其他第三方插件。
+/// 清理标记块外与托管插件 id 相同的重复 insert 条目。
+/// 升级场景：旧版本（或用户手动安装）把插件条目写在标记块外，新版本又通过
+/// 标记块托管同一插件 → 同一 id 被 insert 两次，DSH 加载时报「重复插件」
+/// 直接起不来。这里把标记块外 id 与托管插件相同的条目删除（标记块内的托管
+/// 版本是权威）。只按 id 匹配托管插件自身，绝不触碰用户安装的其他第三方插件。
 fn dedupe_managed_dups(existing: &str) -> String {
     let lines: Vec<&str> = existing.lines().collect();
     let mut out: Vec<&str> = Vec::with_capacity(lines.len());
@@ -702,6 +705,60 @@ mod tests {
         assert_eq!(once, twice);
         assert_eq!(once.matches(MARK_BEGIN).count(), 1);
         assert_eq!(once.matches(MARK_END).count(), 1);
+    }
+
+    #[test]
+    fn dedupes_user_installed_dup_before_block() {
+        // 用户曾手动安装 dsh-webui-plus：条目写在标记块**之前**（旧版鲸仔
+        // 只托管 whalito-settings 时用户手动加的），升级后标记块托管同 id →
+        // 必须只保留标记块内一份，否则 DSH 报重复插件起不来。
+        let input = format!(
+            "- insert:\n    - id: dsh-webui-plus\n      name: '@entireyu/dsh-webui-plus'\n\
+             {MARK_BEGIN}\n- insert:\n    - id: whalito-settings\n      name: '@entireyu/whalito-dsh-settings'\n{MARK_END}\n"
+        );
+        let out = upsert_marker_block(&input);
+        assert_eq!(out.matches("id: dsh-webui-plus").count(), 1, "块前重复条目应被清理：{out}");
+        assert!(block_has_all_pkgs(&out));
+        // 幂等。
+        assert_eq!(upsert_marker_block(&out), out);
+    }
+
+    #[test]
+    fn dedupes_dup_without_name_line() {
+        // 用户手写的条目可能只有 `- id:` 没有 `name:`（或名字写法不同）——
+        // id 是唯一标识，按 id 去重。
+        let input = format!(
+            "{MARK_BEGIN}\n- insert:\n    - id: dsh-webui-plus\n      name: '@entireyu/dsh-webui-plus'\n{MARK_END}\n\
+             - insert:\n    - id: dsh-webui-plus\n"
+        );
+        let out = upsert_marker_block(&input);
+        assert_eq!(out.matches("id: dsh-webui-plus").count(), 1, "无 name 的重复条目也应清理：{out}");
+        assert!(block_has_all_pkgs(&out));
+    }
+
+    #[test]
+    fn dedupes_dup_with_quoted_id() {
+        // 用户手写 id 可能带引号（YAML 合法）——按 id 值去重。
+        let input = format!(
+            "{MARK_BEGIN}\n- insert:\n    - id: dsh-webui-plus\n      name: '@entireyu/dsh-webui-plus'\n{MARK_END}\n\
+             - insert:\n    - id: 'dsh-webui-plus'\n      name: '@entireyu/dsh-webui-plus'\n"
+        );
+        let out = upsert_marker_block(&input);
+        assert_eq!(out.matches("id: dsh-webui-plus").count(), 1, "带引号 id 的重复条目也应清理：{out}");
+        assert_eq!(out.matches("id: 'dsh-webui-plus'").count(), 0);
+        assert!(block_has_all_pkgs(&out));
+    }
+
+    #[test]
+    fn keeps_multi_insert_block_with_user_plugin() {
+        // 块外 `- insert:` 同时含用户插件 + 托管插件（多条目块）→ 不能整体删，
+        // 保守保留（至少不删用户插件；托管的由标记块内权威条目保证加载）。
+        let input = format!(
+            "{MARK_BEGIN}\n- insert:\n    - id: dsh-webui-plus\n      name: '@entireyu/dsh-webui-plus'\n{MARK_END}\n\
+             - insert:\n    - id: dsh-webui-plus\n      name: '@entireyu/dsh-webui-plus'\n    - id: my-ui\n      name: 'my-ui'\n"
+        );
+        let out = upsert_marker_block(&input);
+        assert!(out.contains("id: my-ui"), "用户插件条目必须保留：{out}");
     }
 
     #[test]
