@@ -51,6 +51,10 @@ pub struct AppState {
     /// 已装 DSH 的 `web` 命令是否支持 `--no-open`（启动服务器时抑制自动开浏览器）。
     /// `None` = 尚未探测；进程级缓存，`install_dsh`/`update_dsh` 成功后置回 None 重探。
     pub no_open_supported: Arc<Mutex<Option<bool>>>,
+    /// 安装/更新互斥锁：`install_dsh`/`update_dsh` 在阻塞线程全程持有；
+    /// `start_server` 尝试获取（try_lock），失败即返回「正在安装/更新，请稍候」，
+    /// 杜绝安装中途启动服务器导致的文件竞争/半装。
+    pub install_lock: Arc<Mutex<()>>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]

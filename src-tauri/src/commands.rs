@@ -18,6 +18,8 @@ pub struct Shared {
     pub settings: Arc<Mutex<Settings>>,
     /// 已装 DSH 是否支持 `--no-open`（None = 未探测，进程级缓存）。
     pub no_open_supported: Arc<Mutex<Option<bool>>>,
+    /// 安装/更新互斥锁（与 AppState.install_lock 同一把锁）。
+    pub install_lock: Arc<Mutex<()>>,
 }
 
 impl Shared {
@@ -29,6 +31,7 @@ impl Shared {
             logs: Arc::clone(&st.logs),
             settings: Arc::clone(&st.settings),
             no_open_supported: Arc::clone(&st.no_open_supported),
+            install_lock: Arc::clone(&st.install_lock),
         }
     }
 
@@ -540,11 +543,17 @@ fn install_dsh_inner(app: &AppHandle, shared: &Shared, spec: &str) -> Result<Env
         .join("node_modules")
         .join("@deepseek-ai")
         .join("dsh");
-    let _ = std::fs::remove_dir_all(&dsh_pkg_dir);
-    for shim in ["dsh", "dsh.cmd", "dsh.ps1"] {
-        let _ = std::fs::remove_file(Path::new(&install_prefix).join(shim));
-    }
     let _ = std::fs::create_dir_all(&install_prefix);
+
+    // 旧安装先**暂存**（rename 而非删除）：npm install 若失败（网络/registry
+    // 错误），用户原有的 DSH 安装不会丢失，自动回滚恢复；安装成功后才清理。
+    // 暂存目录放在 prefix 根（node_modules 之外），npm 不会碰它。
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let stash_dir = Path::new(&install_prefix).join(format!(".dsh-reinstall-{ts}"));
+    let stashed = stash_dsh_files(&dsh_pkg_dir, &stash_dir, Path::new(&install_prefix));
 
     let registry = shared.registry();
 
@@ -569,7 +578,7 @@ fn install_dsh_inner(app: &AppHandle, shared: &Shared, spec: &str) -> Result<Env
     let _ = app.emit("install-stage", "install");
     state::push_log(
         &shared.logs,
-        &format!("[系统] 清空旧安装后开始安装 {spec} 到 {install_prefix}"),
+        &format!("[系统] 旧版本已暂存（安装失败可自动回滚），开始安装 {spec} 到 {install_prefix}"),
     );
     let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
     // node 所在目录置顶注入 PATH：koffi 等生命周期脚本 `node ./cnoke.cjs`
@@ -577,7 +586,17 @@ fn install_dsh_inner(app: &AppHandle, shared: &Shared, spec: &str) -> Result<Env
     let node_bin_dir = Path::new(&node)
         .parent()
         .map(|p| p.to_string_lossy().to_string());
-    state::run_streaming_with_path(app, &node, &arg_refs, node_bin_dir.as_deref())?;
+    let install_result =
+        state::run_streaming_with_path(app, &node, &arg_refs, node_bin_dir.as_deref());
+    if let Err(e) = &install_result {
+        // 安装失败：恢复暂存的旧安装（npm 可能写入的半成品先清掉）。
+        rollback_stash(&stash_dir, &stashed);
+        state::push_log(
+            &shared.logs,
+            "[系统] 安装失败，已自动回滚到安装前的 DSH 版本",
+        );
+        return Err(format!("{e}\n安装失败，已自动回滚到安装前的版本，请检查网络后重试。"));
+    }
 
     let _ = app.emit("install-stage", "verify");
     state::push_log(&shared.logs, "[系统] 安装完成，正在校验");
@@ -588,11 +607,77 @@ fn install_dsh_inner(app: &AppHandle, shared: &Shared, spec: &str) -> Result<Env
         let bin_s = bin.to_string_lossy().to_string();
         if let Err(e) = state::run_output(&node, &[&bin_s, "--version"]) {
             state::push_log(&shared.logs, &format!("[系统] Harness 校验失败：{e}"));
-            return Err(format!("Harness 已安装但校验失败：{e}"));
+            rollback_stash(&stash_dir, &stashed);
+            state::push_log(
+                &shared.logs,
+                "[系统] 校验失败，已自动回滚到安装前的 DSH 版本",
+            );
+            return Err(format!("Harness 已安装但校验失败：{e}\n已自动回滚到安装前的版本。"));
         }
     }
 
+    // 安装成功：清理暂存的旧安装（旧版本已被新版本取代）。
+    commit_stash(&stash_dir);
+
     Ok(state::detect_env(node_dir.as_deref()))
+}
+
+/// 把旧 DSH 包目录与入口 shim 暂存（rename）到 stash_dir，返回 (原位置, 暂存位置) 列表。
+/// rename 失败（目录被占用等极端情况）时保持旧行为：删除并继续安装。
+fn stash_dsh_files(
+    dsh_pkg_dir: &Path,
+    stash_dir: &Path,
+    install_prefix: &Path,
+) -> Vec<(PathBuf, PathBuf)> {
+    let mut stashed: Vec<(PathBuf, PathBuf)> = Vec::new();
+    if dsh_pkg_dir.exists() || ["dsh", "dsh.cmd", "dsh.ps1"]
+        .iter()
+        .any(|s| Path::new(install_prefix).join(s).exists())
+    {
+        // rename 不创建父目录：先建暂存目录，失败即降级为旧行为。
+        if std::fs::create_dir_all(stash_dir).is_err() {
+            let _ = std::fs::remove_dir_all(dsh_pkg_dir);
+            for shim in ["dsh", "dsh.cmd", "dsh.ps1"] {
+                let _ = std::fs::remove_file(Path::new(install_prefix).join(shim));
+            }
+            return stashed;
+        }
+    }
+    if dsh_pkg_dir.exists() {
+        let to = stash_dir.join("dsh-pkg");
+        if std::fs::rename(dsh_pkg_dir, &to).is_ok() {
+            stashed.push((dsh_pkg_dir.to_path_buf(), to));
+        } else {
+            let _ = std::fs::remove_dir_all(dsh_pkg_dir);
+        }
+    }
+    for shim in ["dsh", "dsh.cmd", "dsh.ps1"] {
+        let p = Path::new(install_prefix).join(shim);
+        if p.exists() {
+            let to = stash_dir.join(shim);
+            if std::fs::rename(&p, &to).is_ok() {
+                stashed.push((p.clone(), to));
+            } else {
+                let _ = std::fs::remove_file(&p);
+            }
+        }
+    }
+    stashed
+}
+
+/// 安装失败回滚：清掉 npm 可能写入的半成品后，把暂存的旧安装逐项恢复。
+fn rollback_stash(stash_dir: &Path, stashed: &[(PathBuf, PathBuf)]) {
+    for (orig, to) in stashed.iter().rev() {
+        let _ = std::fs::remove_file(orig);
+        let _ = std::fs::remove_dir_all(orig);
+        let _ = std::fs::rename(to, orig);
+    }
+    let _ = std::fs::remove_dir_all(stash_dir);
+}
+
+/// 安装成功：删除暂存的旧安装。
+fn commit_stash(stash_dir: &Path) {
+    let _ = std::fs::remove_dir_all(stash_dir);
 }
 
 #[tauri::command]
@@ -602,9 +687,16 @@ pub async fn install_dsh(app: AppHandle, st: State<'_, AppState>) -> Result<EnvI
     let no_open_supported = Arc::clone(&shared.no_open_supported);
     // 首次安装固定 latest（稳定版）：版本偏好只影响检查与更新，
     // 避免预发布版直接用于全新环境；装好后可切偏好再更新。
-    let env = tauri::async_runtime::spawn_blocking(move || install_dsh_inner(&app, &shared, "@deepseek-ai/dsh"))
-        .await
-        .map_err(|e| e.to_string())??;
+    let env = tauri::async_runtime::spawn_blocking(move || {
+        // 安装/更新互斥：全程持锁，start_server 的 try_lock 在此期间会拒绝启动。
+        let _install_guard = shared.install_lock.lock().unwrap();
+        // 防御：即使前端漏停（或服务器由外部启动），安装前也强制先停止，
+        // 避免 Windows 下运行中的服务器锁定 node_modules 导致重装半途失败。
+        let _ = stop_server_inner(&app, &shared);
+        install_dsh_inner(&app, &shared, "@deepseek-ai/dsh")
+    })
+    .await
+    .map_err(|e| e.to_string())??;
     // 安装/更新会清空应用目录，重同步鲸仔设置分区插件。
     let _ = crate::settings_plugin::ensure_settings_plugin(&app_for_sync);
     // 已装 DSH 变了（可能支持/不再支持 --no-open），失效缓存让下次启动重探。
@@ -619,6 +711,9 @@ pub async fn update_dsh(app: AppHandle, st: State<'_, AppState>) -> Result<EnvIn
     let no_open_supported = Arc::clone(&shared.no_open_supported);
     let spec = dsh_update_spec(shared.dsh_channel());
     let env = tauri::async_runtime::spawn_blocking(move || {
+        // 与 install_dsh 相同的互斥与停服防御（见上）。
+        let _install_guard = shared.install_lock.lock().unwrap();
+        let _ = stop_server_inner(&app, &shared);
         install_dsh_inner(&app, &shared, &spec)
     })
     .await
@@ -692,6 +787,11 @@ pub fn start_server_impl(app: &AppHandle, shared: &Shared) -> Result<ServerStatu
     if shared.pid.lock().unwrap().is_some() {
         return Err("服务器已在运行".to_string());
     }
+    // 安装/更新互斥：install/update 持锁期间拒绝启动（托盘/外部触发也走这里）。
+    let _install_guard = shared
+        .install_lock
+        .try_lock()
+        .map_err(|_| "正在安装/更新 DeepSeek Harness，请稍候再启动".to_string())?;
 
     let (port, workspace) = {
         let s = shared.settings.lock().unwrap();
@@ -1246,5 +1346,72 @@ mod tests {
         ));
         assert!(!is_allowed_download_url("http://127.0.0.1:3080/api/session.export", None, 30080));
         assert!(!is_allowed_download_url("http://evil.example/api/session.export", None, 30080));
+    }
+
+    #[test]
+    fn stash_rollback_restores_old_install() {
+        // 安装失败回滚：暂存后旧 DSH 包目录与 shim 都被 rename 走，
+        // rollback 把它们恢复到原位（并清掉 npm 可能写入的半成品）。
+        let base = std::env::temp_dir().join(format!("whalito-stash-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let prefix = base.join("prefix");
+        let dsh_pkg = prefix.join("node_modules").join("@deepseek-ai").join("dsh");
+        std::fs::create_dir_all(&dsh_pkg).unwrap();
+        std::fs::write(dsh_pkg.join("index.js"), "old dsh").unwrap();
+        std::fs::write(prefix.join("dsh.cmd"), "@echo old").unwrap();
+        std::fs::write(prefix.join("dsh.ps1"), "# old").unwrap();
+        let stash_dir = prefix.join(".dsh-reinstall-test");
+
+        let stashed = stash_dsh_files(&dsh_pkg, &stash_dir, &prefix);
+        assert_eq!(stashed.len(), 3, "包目录 + 两个 shim 都应暂存");
+        assert!(!dsh_pkg.exists(), "暂存后原位置不应有旧包");
+        assert!(!prefix.join("dsh.cmd").exists());
+        // 模拟 npm 写入了半成品。
+        std::fs::create_dir_all(&dsh_pkg).unwrap();
+        std::fs::write(dsh_pkg.join("index.js"), "half written").unwrap();
+        std::fs::write(prefix.join("dsh.cmd"), "@echo half").unwrap();
+
+        rollback_stash(&stash_dir, &stashed);
+        assert_eq!(std::fs::read_to_string(dsh_pkg.join("index.js")).unwrap(), "old dsh");
+        assert_eq!(std::fs::read_to_string(prefix.join("dsh.cmd")).unwrap(), "@echo old");
+        assert!(prefix.join("dsh.ps1").exists());
+        assert!(!stash_dir.exists(), "回滚后暂存目录应删除");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn stash_commit_discards_old_install() {
+        // 安装成功：commit 删除暂存，旧安装不恢复。
+        let base = std::env::temp_dir().join(format!("whalito-stash2-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let prefix = base.join("prefix");
+        let dsh_pkg = prefix.join("node_modules").join("@deepseek-ai").join("dsh");
+        std::fs::create_dir_all(&dsh_pkg).unwrap();
+        std::fs::write(dsh_pkg.join("index.js"), "old").unwrap();
+        let stash_dir = prefix.join(".dsh-reinstall-test");
+
+        let stashed = stash_dsh_files(&dsh_pkg, &stash_dir, &prefix);
+        assert_eq!(stashed.len(), 1);
+        assert!(stash_dir.join("dsh-pkg").join("index.js").exists());
+        commit_stash(&stash_dir);
+        assert!(!stash_dir.exists());
+        assert!(!dsh_pkg.exists(), "成功安装场景旧包不恢复（npm 已写新包）");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn stash_without_old_install_is_empty() {
+        // 首次安装（无旧 DSH）：无暂存项，后续 commit/rollback 均为空操作。
+        let base = std::env::temp_dir().join(format!("whalito-stash3-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let prefix = base.join("prefix");
+        let dsh_pkg = prefix.join("node_modules").join("@deepseek-ai").join("dsh");
+        let stash_dir = prefix.join(".dsh-reinstall-test");
+        let stashed = stash_dsh_files(&dsh_pkg, &stash_dir, &prefix);
+        assert!(stashed.is_empty());
+        commit_stash(&stash_dir);
+        rollback_stash(&stash_dir, &stashed);
+        assert!(!stash_dir.exists());
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

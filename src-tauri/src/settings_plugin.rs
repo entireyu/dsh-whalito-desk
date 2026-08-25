@@ -166,11 +166,12 @@ fn backup_dsh_config_at(
     fs::create_dir_all(backup_root)
         .map_err(|e| format!("创建备份目录 {} 失败：{e}", backup_root.display()))?;
 
-    let secs = std::time::SystemTime::now()
+    let millis = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
+        .map(|d| d.as_millis())
         .unwrap_or(0);
-    let dir = backup_root.join(format!("dsh-backup-{secs}"));
+    // 毫秒级命名：避免同一秒内连续两次备份同名目录（合并/剪枝计数出错）。
+    let dir = backup_root.join(format!("dsh-backup-{millis}"));
     fs::create_dir_all(&dir).map_err(|e| format!("创建备份目录 {} 失败：{e}", dir.display()))?;
     let mut copied = 0usize;
 
@@ -237,7 +238,8 @@ fn backup_dsh_config_at(
         }
     }
 
-    prune_backups(backup_root)?;
+    // 清理旧备份：失败不阻断本次备份（best-effort，下次安装再试）。
+    let _ = prune_backups(backup_root);
     if copied == 0 {
         // 没有可备份内容：删除刚建的空目录。
         let _ = fs::remove_dir_all(&dir);
@@ -806,10 +808,9 @@ mod tests {
         fs::create_dir_all(&home).unwrap();
         fs::create_dir_all(&prefix).unwrap();
         fs::write(home.join("settings.yaml"), "k: v\n").unwrap();
-        // 连续备份 MAX_BACKUPS + 3 次（时间戳秒级可能相同，插入等待即可稳定）。
+        // 连续备份 MAX_BACKUPS + 3 次（毫秒级命名不会同名冲突）。
         for _ in 0..(MAX_BACKUPS + 3) {
             backup_dsh_config_at(&home, &prefix, &backup_root).unwrap();
-            std::thread::sleep(std::time::Duration::from_millis(1100));
         }
         let kept = fs::read_dir(&backup_root)
             .unwrap()
