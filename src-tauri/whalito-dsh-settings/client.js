@@ -9,7 +9,9 @@
 // 点击/滚轮/Escape 上行 context-menu-close 关闭它。
 // 内嵌时接管会话日志导出：包装 HTMLAnchorElement.prototype.click，导出锚点
 // 上行 whalito-download(url, filename)，由鲸仔下载到配置目录并提示。
-// 非鲸仔环境（普通浏览器，window.parent === window）不注册分区。
+// 内嵌时接管外部链接：捕获阶段拦截 <a target="_blank"> 的 http(s) 链接，
+// 上行 open-url，由鲸仔用系统默认浏览器打开（WebView2 会拦截 window.open）。
+// 非鲸仔环境（普通浏览器，window.parent === window）不注册分区、不接管。
 //
 // 注意：jsx(type, config, maybeKey) 的第三个位置参数是 key 而不是 children，
 // children 必须放进 config.children（否则 dev/prod 运行时都会丢弃子节点，分区空白）。
@@ -361,6 +363,38 @@
             value: { writeText: bridgeWriteText },
           });
         }
+      }
+
+      // 接管外部链接打开：DSH 把对话/搜索结果中的 http(s) 链接渲染为
+      // <a target="_blank" rel="noopener noreferrer">，内嵌 iframe（WebView2）
+      // 里点击会被 WebView 拦截（无反应）。捕获阶段拦截这类链接，上行
+      // open-url，由鲸仔主窗口 invoke(open_url) 用系统默认浏览器打开。
+      // 普通浏览器打开（window.parent === window）不接管，保留原生行为。
+      if (window.parent !== window) {
+        window.document.addEventListener(
+          'click',
+          function (e) {
+            var t = e && e.target;
+            var el = t instanceof window.HTMLElement ? t : null;
+            while (el !== null && el.tagName !== 'A') el = el.parentElement;
+            if (el === null || el.tagName !== 'A') return;
+            var href = typeof el.getAttribute === 'function' ? el.getAttribute('href') : null;
+            if (typeof href !== 'string' || href === '') return;
+            // 只拦外部链接（含协议或 // 开头）；站内相对路径/锚点不动。
+            if (href.indexOf('://') === -1 && href.indexOf('//') !== 0) return;
+            var wantsBlank = el.target === '_blank' || el.getAttribute('target') === '_blank';
+            if (!wantsBlank) return;
+            e.preventDefault();
+            e.stopPropagation();
+            postToParent({
+              channel: CHANNEL,
+              type: 'action',
+              action: 'open-url',
+              url: href,
+            });
+          },
+          true,
+        );
       }
 
       // ---- 内联样式（中性色 + currentColor，适配明暗主题） ----

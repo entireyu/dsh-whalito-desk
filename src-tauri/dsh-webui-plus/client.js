@@ -191,69 +191,16 @@
 
       /**
        * 用系统默认浏览器打开外部链接。
-       *  - 鲸仔（Whalito）内嵌环境：DSH 页面被嵌入跨源 iframe，window.open 会被
-       *    Tauri WebView 拦截；改走既有桥通道 postMessage → 父窗口 invoke(open_url)
-       *    → 系统默认浏览器。
-       *  - 普通浏览器（DSH 原生 web / 直接访问 30080）：回退 window.open。
+       * 本插件是通用 WebUI 增强（用户可能是纯 web 用户），不感知宿主环境：
+       * 统一用原生 window.open。若运行在鲸仔内嵌环境，由鲸仔侧专属插件
+       * （@entireyu/whalito-dsh-settings）在捕获阶段接管 target=_blank 链接，
+       * 走桥通道交给鲸仔用系统默认浏览器打开，与本插件无关。
        */
-      function isEmbeddedCrossOrigin() {
-        try {
-          if (window.parent === window || window.parent === null) return false;
-          if (window.location.origin === window.parent.location.origin) return false;
-          return true;
-        } catch (err) {
-          // 跨源读取 parent.origin 会抛 SecurityError → 必然被嵌入跨源 iframe。
-          return window.parent !== window && window.parent !== null;
-        }
-      }
-
       function openExternal(url) {
         if (typeof url !== 'string' || url === '') return;
         try {
-          if (isEmbeddedCrossOrigin()) {
-            window.parent.postMessage({
-              channel: 'whalito',
-              type: 'action',
-              action: 'open-url',
-              url: url,
-            }, '*');
-            return;
-          }
-        } catch (err) { /* 桥不可用则回退 */ }
-        try {
           window.open(url, '_blank', 'noopener');
         } catch (err) { /* 弹窗被拦截时忽略 */ }
-      }
-
-      /**
-       * 全局外部链接拦截（仅鲸仔内嵌环境安装）：
-       *  DSH 原生把对话中的网址渲染为 <a target="_blank" rel="noopener noreferrer">，
-       *  在跨源 iframe 里点击会被 Tauri WebView 拦截（无反应）。这里用捕获阶段
-       *  监听文档级 click，拦截所有 target=_blank 的 <a>，改走 openExternal 桥通道。
-       *  普通浏览器不安装，保持原生行为。返回卸载函数。
-       */
-      function installExternalLinkCapture() {
-        if (typeof window === 'undefined' || typeof window.document === 'undefined') return function () {};
-        if (!isEmbeddedCrossOrigin()) return function () {};
-        function onClick(e) {
-          var target = e && e.target;
-          var el = target instanceof window.HTMLElement ? target : null;
-          while (el !== null && el.tagName !== 'A') el = el.parentElement;
-          if (el === null || el.tagName !== 'A') return;
-          var href = el.getAttribute && el.getAttribute('href');
-          if (typeof href !== 'string' || href === '') return;
-          var isExternal = href.indexOf('://') !== -1 || href.indexOf('//') === 0;
-          if (!isExternal) return;
-          var wantsBlank = el.target === '_blank' || el.getAttribute('target') === '_blank';
-          if (!wantsBlank) return;
-          e.preventDefault();
-          e.stopPropagation();
-          openExternal(href);
-        }
-        window.document.addEventListener('click', onClick, true);
-        return function () {
-          window.document.removeEventListener('click', onClick, true);
-        };
       }
 
       /** 一行 caption 的样式。 */
@@ -1818,14 +1765,6 @@
         workspacesFace = ctx.get('workspaces') || null;
         var slots = ctx.get('slots');
         if (slots === undefined) return;
-
-        // 全局外部链接捕获（仅鲸仔内嵌环境生效）：对话/搜索结果里的
-        // <a target="_blank"> 点击在跨源 iframe 中会被 Tauri WebView 拦截，
-        // 捕获阶段统一改走桥通道 → 系统默认浏览器。
-        var uninstallLinks = installExternalLinkCapture();
-        if (typeof ctx.on === 'function') {
-          ctx.on('dispose', uninstallLinks);
-        }
 
         // 功能 2/3/4：每轮完成后的尾部扩展链（首个且唯一条目，每轮都挂载）。
         slots.inject('conversation.chat.turnTail', function () {
