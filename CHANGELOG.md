@@ -7,10 +7,10 @@
 ## [0.4.7] - 2026-08-25
 
 ### 新增
-- 预置 WebUI+ 增强插件（`@entireyu/dsh-webui-plus`）：随鲸仔启动同步到 web profile 的 `node_modules` 与 `cordis.patch.yml`（与既有鲸仔设置分区同一托管标记块，双插件共存）；设置页新增插件版本徽标、GitHub 链接与鲸仔推荐卡片（`whalito.jniantic.cn`）。
+- 预置 WebUI+ 增强插件（`@entireyu/dsh-webui-plus`）：随鲸仔启动同步到 web profile 的 `node_modules` 与 `cordis.patch.yml`（与既有鲸仔设置分区同一托管标记块，双插件共存）；WebUI+ 设置页新增插件版本徽标、GitHub 链接与鲸仔推荐卡片（`whalito.jniantic.cn`）。
 
 ### 修复
-- 修复内嵌 DSH 页面的外部链接无法用默认浏览器打开：`window.open` 在 Tauri WebView 的跨源 iframe 中会被拦截，改为经鲸仔桥 `postMessage(open-url)` → 父窗口 `open_url` 命令 → 系统默认浏览器（普通浏览器环境自动回退 `window.open`）。
+- 修复内嵌 DSH 页面里链接点击无反应：DSH 原生把对话/搜索结果中的 http(s) 链接渲染为 `<a target="_blank">`，在 Tauri WebView 的跨源 iframe 中点击会被拦截。改由鲸仔专属插件（`whalito-dsh-settings`）在捕获阶段接管这类链接，经桥 `postMessage(open-url)` → 父窗口 `open_url` 命令 → 系统默认浏览器打开；WebUI+ 等通用插件保持原生 `window.open`，不感知宿主环境（普通浏览器行为不受影响）。
 - 修复旧版测试构建把托管标记 `⟪` 写成 `隡` 的编码损坏：同步时识别旧标记并统一替换为标准标记，避免 cordis.patch.yml 出现两个托管块重复 insert。
 
 ## [0.4.6] - 2026-08-20
