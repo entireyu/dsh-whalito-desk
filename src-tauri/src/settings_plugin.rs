@@ -111,16 +111,80 @@ fn bare_empty_list(existing: &str) -> bool {
     items.len() == 1 && items[0] == "[]"
 }
 
+/// 行级结构：`- insert:` 块 = 顶格 `- insert:` + 缩进的 `- id:` + `name:`。
+/// 判断某 `- insert:` 行是否构成与托管插件完全一致的单一条目。
+/// 要求该块恰好三行结束（下一行不存在/空行/顶格），避免误删带延续行的块。
+fn is_managed_dup_insert(lines: &[&str], at: usize) -> bool {
+    let Some(first) = lines.get(at) else { return false };
+    if first.trim() != "- insert:" {
+        return false;
+    }
+    // 下一行必须是 `    - id: <pkg.id>`，再下一行 `      name: '<pkg.name>'`。
+    let (Some(id_line), Some(name_line)) = (lines.get(at + 1), lines.get(at + 2)) else {
+        return false;
+    };
+    let id_trim = id_line.trim();
+    let name_trim = name_line.trim();
+    if !id_trim.starts_with("- id:") || !name_trim.starts_with("name:") {
+        return false;
+    }
+    let id_val = id_trim["- id:".len()..].trim();
+    let name_val = name_trim["name:".len()..].trim().trim_matches('\'');
+    let matched = PKGS
+        .iter()
+        .any(|p| p.id == id_val && p.name == name_val);
+    if !matched {
+        return false;
+    }
+    // 块必须恰好三行：at+3 不存在、空行、或以非空白开头（下一个顶格条目）。
+    match lines.get(at + 3) {
+        None => true,
+        Some(next) => {
+            let t = next.trim();
+            t.is_empty() || !t.starts_with('-') && !t.starts_with("  ") && !t.starts_with('\t')
+        }
+    }
+}
+
+/// 清理标记块外与托管插件完全一致的重复 insert 条目。
+/// 升级场景：旧版本把插件条目写在标记块外（用户手动安装 / 旧版同步残留），
+/// 新版本又通过标记块托管同一插件 → 同一插件被 insert 两次，DSH 加载时报错
+/// 或后加载覆盖前加载（表现为"插件配置被覆盖/消失"）。这里把标记块外与
+/// 托管插件 id+name 完全相同的条目删除（标记块内的托管版本是权威）。
+/// 只精确匹配托管插件自身，绝不触碰用户安装的其他第三方插件。
+fn dedupe_managed_dups(existing: &str) -> String {
+    let lines: Vec<&str> = existing.lines().collect();
+    let mut out: Vec<&str> = Vec::with_capacity(lines.len());
+    let mut i = 0;
+    // 标记块外 = 不在 MARK_BEGIN..=MARK_END 之间的行。
+    let begin = lines.iter().position(|l| l.trim() == MARK_BEGIN);
+    let end = lines.iter().position(|l| l.trim() == MARK_END);
+    while i < lines.len() {
+        let in_block = match (begin, end) {
+            (Some(b), Some(e)) if b <= i && i <= e => true,
+            _ => false,
+        };
+        if !in_block && is_managed_dup_insert(&lines, i) {
+            i += 3;
+            continue;
+        }
+        out.push(lines[i]);
+        i += 1;
+    }
+    out.join("\n")
+}
+
 /// 在标记块内 upsert 插件 insert 行：两个标记都存在则整块替换，
 /// 否则追加——若文件是"仅空列表"则把 `[]` 就地替换为块（避免
 /// flow 序列后接 block 条目的 YAML 语法错误）。标记块外内容原样保留。
 ///
 /// 兼容旧版损坏标记：旧测试构建把 `⟪` 写成了 `隡`，先把它们规范化为
 /// 标准标记再处理，保证新旧版本间幂等、不产生重复标记块。
+/// 最后清理标记块外与托管插件重复的 insert 条目（升级残留去重）。
 pub fn upsert_marker_block(existing: &str) -> String {
     let normalized = existing.replace(LEGACY_MARK_BEGIN, MARK_BEGIN).replace(LEGACY_MARK_END, MARK_END);
     let existing = &normalized;
-    match (existing.find(MARK_BEGIN), existing.find(MARK_END)) {
+    let merged = match (existing.find(MARK_BEGIN), existing.find(MARK_END)) {
         (Some(begin), Some(end)) if end > begin => {
             let tail_start = match existing[end..].find('\n') {
                 Some(i) => end + i + 1,
@@ -146,14 +210,47 @@ pub fn upsert_marker_block(existing: &str) -> String {
             out.push_str(&managed_block());
             out
         }
+    };
+    // 去重后再补一个结尾换行（lines/join 会吃掉末尾 \n）。
+    let deduped = dedupe_managed_dups(&merged);
+    if deduped.ends_with('\n') {
+        deduped
+    } else {
+        format!("{deduped}\n")
     }
 }
 
+/// 从 package.json 内容解析版本号（供"磁盘版本 ≥ 内置版本则跳过"比较）。
+fn pkg_version(package_json: &str) -> Option<(u64, u64, u64)> {
+    let v: serde_json::Value = serde_json::from_str(package_json).ok()?;
+    let ver = v.get("version")?.as_str()?;
+    crate::state::parse_semver(ver)
+}
+
 /// 把内置插件文件写入 profile 的 node_modules；按内容比对，返回是否有写入。
+/// 版本感知：磁盘上已存在版本 ≥ 内置版本的包 → 整体跳过（尊重用户手动安装/
+/// 升级的插件，升级鲸仔不降级覆盖用户内容）；仅当磁盘版本更低或未安装时才
+/// 写入内置版本（保证鲸仔托管的新版本仍能推送）。
 pub fn sync_package_files(profile: &Path) -> Result<bool, String> {
     let mut changed = false;
     for pkg in PKGS {
         let pkg_dir = profile.join("node_modules").join(pkg.name);
+        // 内置 package.json 即 files 中的第一项；磁盘版本与之比较。
+        let builtin_json = pkg
+            .files
+            .iter()
+            .find(|(n, _)| *n == "package.json")
+            .map(|(_, c)| *c);
+        let disk_pkg_path = pkg_dir.join("package.json");
+        let disk_json = fs::read_to_string(&disk_pkg_path).ok();
+        let builtin_ver = builtin_json.and_then(pkg_version);
+        let disk_ver = disk_json.as_deref().and_then(pkg_version);
+        if let (Some(b), Some(d)) = (builtin_ver, disk_ver) {
+            if d >= b {
+                // 用户安装的版本不低于内置：不覆盖，避免"已安装的插件被还原"。
+                continue;
+            }
+        }
         for (name, content) in pkg.files {
             let path = pkg_dir.join(name);
             let same = fs::read_to_string(&path)
@@ -352,5 +449,93 @@ mod tests {
             }
         }
         let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn sync_package_files_respects_newer_installed_version() {
+        // 磁盘上已存在更高版本（用户手动安装/升级过）→ 同步不降级覆盖。
+        let base = std::env::temp_dir().join(format!("whalito-ver-test-{}", std::process::id()));
+        let profile = base.join("profiles").join("web");
+        let _ = fs::remove_dir_all(&base);
+        let pkg_dir = profile.join("node_modules").join(PKGS[1].name);
+        fs::create_dir_all(&pkg_dir).unwrap();
+        // 写入一个版本比内置更高的 package.json（如 0.2.0）与"用户自定义"的 client.js。
+        let newer = r#"{"name":"@entireyu/dsh-webui-plus","version":"0.2.0"}"#;
+        fs::write(pkg_dir.join("package.json"), newer).unwrap();
+        let custom = "// 用户自定义内容\n";
+        fs::write(pkg_dir.join("client.js"), custom).unwrap();
+        // 首次同步：whalito-settings 未安装会写入（整体 changed=true），
+        // 但 dsh-webui-plus 版本更高必须跳过覆盖。
+        sync_package_files(&profile).unwrap();
+        assert_eq!(
+            fs::read_to_string(pkg_dir.join("package.json")).unwrap(),
+            newer,
+            "版本更高的 package.json 不应被降级覆盖"
+        );
+        assert_eq!(
+            fs::read_to_string(pkg_dir.join("client.js")).unwrap(),
+            custom,
+            "用户自定义 client.js 不应被覆盖"
+        );
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn sync_package_files_upgrades_older_version() {
+        // 磁盘版本低于内置（旧鲸仔装的）→ 正常覆盖为内置版本。
+        let base = std::env::temp_dir().join(format!("whalito-upg-test-{}", std::process::id()));
+        let profile = base.join("profiles").join("web");
+        let _ = fs::remove_dir_all(&base);
+        let pkg_dir = profile.join("node_modules").join(PKGS[1].name);
+        fs::create_dir_all(&pkg_dir).unwrap();
+        fs::write(pkg_dir.join("package.json"), r#"{"name":"@entireyu/dsh-webui-plus","version":"0.0.9"}"#).unwrap();
+        assert!(sync_package_files(&profile).unwrap());
+        let written = fs::read_to_string(pkg_dir.join("package.json")).unwrap();
+        assert!(written.contains("\"0.1.2\""), "应升级为内置版本：{written}");
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn dedupes_duplicate_managed_insert_outside_block() {
+        // 升级残留：标记块外还有一条与托管插件完全一致的 insert（用户旧版手动
+        // 安装或旧同步残留）→ 应被删除，避免同一插件被 insert 两次。
+        let dup = format!(
+            "{MARK_BEGIN}\n\
+             - insert:\n    - id: whalito-settings\n      name: '@entireyu/whalito-dsh-settings'\n\
+             - insert:\n    - id: dsh-webui-plus\n      name: '@entireyu/dsh-webui-plus'\n\
+             {MARK_END}\n\
+             - insert:\n    - id: dsh-webui-plus\n      name: '@entireyu/dsh-webui-plus'\n"
+        );
+        let out = upsert_marker_block(&dup);
+        // 标记块外的重复条目被清掉；标记块内保留一份。
+        assert_eq!(out.matches("name: '@entireyu/dsh-webui-plus'").count(), 1);
+        assert_eq!(out.matches("name: '@entireyu/whalito-dsh-settings'").count(), 1);
+        assert!(block_has_all_pkgs(&out));
+    }
+
+    #[test]
+    fn keeps_user_third_party_inserts_outside_block() {
+        // 标记块外用户安装的其他第三方插件条目（与托管无关）必须保留。
+        let input = format!(
+            "{MARK_BEGIN}\n- insert:\n    - id: whalito-settings\n      name: '@entireyu/whalito-dsh-settings'\n{MARK_END}\n\
+             - insert:\n    - id: my-user-plugin\n      name: 'some-user-plugin'\n"
+        );
+        let out = upsert_marker_block(&input);
+        assert!(out.contains("id: my-user-plugin"));
+        assert!(out.contains("name: 'some-user-plugin'"));
+        assert!(block_has_all_pkgs(&out));
+    }
+
+    #[test]
+    fn dedupe_is_idempotent_with_dups() {
+        let dup = format!(
+            "{MARK_BEGIN}\n- insert:\n    - id: dsh-webui-plus\n      name: '@entireyu/dsh-webui-plus'\n{MARK_END}\n\
+             - insert:\n    - id: dsh-webui-plus\n      name: '@entireyu/dsh-webui-plus'\n"
+        );
+        let once = upsert_marker_block(&dup);
+        let twice = upsert_marker_block(&once);
+        assert_eq!(once, twice);
+        assert_eq!(once.matches(MARK_BEGIN).count(), 1);
+        assert_eq!(once.matches(MARK_END).count(), 1);
     }
 }

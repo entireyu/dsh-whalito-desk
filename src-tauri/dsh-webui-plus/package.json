@@ -1,6 +1,6 @@
 {
   "name": "@entireyu/dsh-webui-plus",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "private": false,
   "description": "DSH WebUI+ 增强插件：模型供应商展示、单轮耗时与 token、编辑并重发、失败重试与详细错误",
   "type": "module",

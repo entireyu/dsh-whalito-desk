@@ -4,6 +4,14 @@
 
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+### 修复
+- 修复升级鲸仔后用户手动安装的第三方插件消失：DSH 安装/更新时不再整目录清空应用专用 npm 前缀（`remove_dir_all(install_prefix)`），只清理 DSH 本体包与顶层入口，用户用 `npm install -g --prefix <install_prefix> <插件>` 安装的插件原样保留
+- 修复鲸仔托管插件（WebUI+ / 设置分区）被无条件覆盖还原：插件文件同步改为版本感知——磁盘上已存在版本 ≥ 内置版本的包整体跳过，升级鲸仔不再降级覆盖用户手动安装/升级的插件；仅当磁盘版本更低（或未安装）时才写入内置版本
+- 修复升级后 cordis.patch.yml 出现重复 insert：同步时清理标记块外与托管插件 id+name 完全一致的残留条目（旧版手动安装/旧同步残留），避免同一插件被 insert 两次
+- 内置 WebUI+ 插件的 package.json 版本同步到 0.1.2（与 npm 发布一致，此前 0.4.7 内置仍为 0.1.0，会把用户安装的 0.1.2 降级为 0.1.0）
+
 ## [0.4.7] - 2026-08-25
 
 ### 新增
