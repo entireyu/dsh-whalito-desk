@@ -81,6 +81,171 @@ pub fn profile_dir() -> PathBuf {
     dsh_home().join("profiles").join("web")
 }
 
+/// —— DSH 配置备份（安装/更新 DSH 前调用）——
+/// 备份 DSH 家目录下的配置（settings.yaml、凭证、profiles 等，排除可重建的
+/// node_modules 与体积大的会话/附件数据）以及应用专用 npm 前缀下用户手动安装
+/// 的第三方插件（排除 DSH 本体）。备份存到鲸仔应用配置目录 dsh-backup 下，
+/// 保留最近 MAX_BACKUPS 份，旧的自动清理。best-effort：失败不阻断安装。
+const MAX_BACKUPS: usize = 5;
+
+/// 递归复制目录，跳过指定名称的子项（不区分文件/目录）。
+fn copy_dir_recursive(src: &Path, dst: &Path, skip_names: &[&str]) -> Result<usize, String> {
+    let mut count = 0;
+    for entry in fs::read_dir(src).map_err(|e| format!("读取 {} 失败：{e}", src.display()))? {
+        let entry = entry.map_err(|e| format!("读取目录项失败：{e}"))?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if skip_names.contains(&name.as_str()) {
+            continue;
+        }
+        let from = entry.path();
+        let to = dst.join(&name);
+        if entry
+            .file_type()
+            .map_err(|e| format!("读取类型失败：{e}"))?
+            .is_dir()
+        {
+            fs::create_dir_all(&to)
+                .map_err(|e| format!("创建 {} 失败：{e}", to.display()))?;
+            count += copy_dir_recursive(&from, &to, skip_names)?;
+        } else {
+            fs::copy(&from, &to).map_err(|e| format!("复制 {} 失败：{e}", from.display()))?;
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
+/// 清理旧备份：保留最近 MAX_BACKUPS 份（按目录名排序，时间戳前缀可字典序）。
+fn prune_backups(backup_root: &Path) -> Result<(), String> {
+    let mut dirs: Vec<PathBuf> = fs::read_dir(backup_root)
+        .map_err(|e| format!("读取备份目录 {} 失败：{e}", backup_root.display()))?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| {
+            p.is_dir()
+                && p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with("dsh-backup-"))
+        })
+        .collect();
+    dirs.sort();
+    while dirs.len() > MAX_BACKUPS {
+        if let Some(oldest) = dirs.first() {
+            fs::remove_dir_all(oldest)
+                .map_err(|e| format!("清理旧备份 {} 失败：{e}", oldest.display()))?;
+        }
+        dirs.remove(0);
+    }
+    Ok(())
+}
+
+/// 备份 DSH 配置与应用前缀下的用户插件；返回备份目录路径（无可备份时返回 None）。
+/// 备份内容：
+///   - DSH 家目录顶层配置文件（settings.yaml / .credentials.yaml / 匿名 id 等）
+///   - profiles 目录（排除 node_modules——依赖可重建，且体积大头在会话/附件）
+///   - .agent-presets（如存在）
+///   - 应用专用 npm 前缀下用户手动安装的第三方插件（排除 DSH 本体 @deepseek-ai/dsh）
+pub fn backup_dsh_config(app: &AppHandle) -> Result<Option<PathBuf>, String> {
+    let home = dsh_home();
+    let backup_root = app
+        .path()
+        .app_config_dir()
+        .map_err(|e| format!("获取应用配置目录失败：{e}"))?
+        .join("dsh-backup");
+    let prefix = crate::state::app_prefix_dir();
+    backup_dsh_config_at(&home, &prefix, &backup_root)
+}
+
+/// 备份实现（独立纯函数，便于单元测试）：把 home 下的配置与 prefix 下的用户
+/// 插件复制到 backup_root/dsh-backup-<unix秒>，保留最近 MAX_BACKUPS 份。
+fn backup_dsh_config_at(
+    home: &Path,
+    prefix: &Path,
+    backup_root: &Path,
+) -> Result<Option<PathBuf>, String> {
+    fs::create_dir_all(backup_root)
+        .map_err(|e| format!("创建备份目录 {} 失败：{e}", backup_root.display()))?;
+
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let dir = backup_root.join(format!("dsh-backup-{secs}"));
+    fs::create_dir_all(&dir).map_err(|e| format!("创建备份目录 {} 失败：{e}", dir.display()))?;
+    let mut copied = 0usize;
+
+    // 1. DSH 家目录顶层配置文件。
+    for name in [
+        "settings.yaml",
+        ".credentials.yaml",
+        ".anonymous-user-id",
+        "pet-style.json",
+    ] {
+        let src = home.join(name);
+        if src.is_file() {
+            fs::copy(&src, dir.join(name))
+                .map_err(|e| format!("复制 {} 失败：{e}", src.display()))?;
+            copied += 1;
+        }
+    }
+
+    // 2. profiles（排除 node_modules）。
+    let profiles_src = home.join("profiles");
+    if profiles_src.is_dir() {
+        let dst = dir.join("profiles");
+        fs::create_dir_all(&dst).map_err(|e| format!("创建 {} 失败：{e}", dst.display()))?;
+        copied += copy_dir_recursive(&profiles_src, &dst, &["node_modules"])?;
+    }
+
+    // 3. agent presets。
+    let presets_src = home.join(".agent-presets");
+    if presets_src.is_dir() {
+        copied += copy_dir_recursive(&presets_src, &dir.join(".agent-presets"), &[])?;
+    }
+
+    // 4. 应用专用 npm 前缀下的用户插件（排除 DSH 本体与 @deepseek-ai 依赖）。
+    let user_nm = prefix.join("node_modules");
+    if user_nm.is_dir() {
+        let dst = dir.join("user-plugins");
+        fs::create_dir_all(&dst).map_err(|e| format!("创建 {} 失败：{e}", dst.display()))?;
+        for entry in fs::read_dir(&user_nm)
+            .map_err(|e| format!("读取 {} 失败：{e}", user_nm.display()))?
+        {
+            let entry = entry.map_err(|e| format!("读取目录项失败：{e}"))?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name == "@deepseek-ai" {
+                // 只跳过 DSH 本体，@deepseek-ai 下其他用户插件仍备份。
+                let dsh_sub = entry.path().join("dsh");
+                if dsh_sub.is_dir() {
+                    continue;
+                }
+            }
+            let to = dst.join(&name);
+            if entry
+                .file_type()
+                .map_err(|e| format!("读取类型失败：{e}"))?
+                .is_dir()
+            {
+                fs::create_dir_all(&to)
+                    .map_err(|e| format!("创建 {} 失败：{e}", to.display()))?;
+                copied += copy_dir_recursive(&entry.path(), &to, &[])?;
+            } else {
+                fs::copy(entry.path(), &to)
+                    .map_err(|e| format!("复制 {} 失败：{e}", entry.path().display()))?;
+                copied += 1;
+            }
+        }
+    }
+
+    prune_backups(backup_root)?;
+    if copied == 0 {
+        // 没有可备份内容：删除刚建的空目录。
+        let _ = fs::remove_dir_all(&dir);
+        return Ok(None);
+    }
+    Ok(Some(dir))
+}
+
 /// 生成托管的 cordis.patch.yml 标记块：每个插件包一行 insert。
 fn managed_block() -> String {
     let mut lines = String::from(MARK_BEGIN);
@@ -537,5 +702,77 @@ mod tests {
         assert_eq!(once, twice);
         assert_eq!(once.matches(MARK_BEGIN).count(), 1);
         assert_eq!(once.matches(MARK_END).count(), 1);
+    }
+
+    #[test]
+    fn backup_copies_config_and_skips_node_modules() {
+        let base = std::env::temp_dir().join(format!("whalito-bak-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let home = base.join("home");
+        let prefix = base.join("prefix");
+        let backup_root = base.join("backup");
+        // 构造 DSH 家目录：settings.yaml + profiles/web（含 node_modules 与 patch）。
+        fs::create_dir_all(home.join("profiles").join("web").join("node_modules")).unwrap();
+        fs::write(home.join("settings.yaml"), "k: v\n").unwrap();
+        fs::write(home.join("profiles").join("web").join("cordis.patch.yml"), "# p\n").unwrap();
+        fs::write(home.join("profiles").join("web").join("node_modules").join("big.bin"), "x".repeat(10)).unwrap();
+        // 构造应用前缀：DSH 本体 + 用户第三方插件。
+        fs::create_dir_all(prefix.join("node_modules").join("@deepseek-ai").join("dsh")).unwrap();
+        fs::write(prefix.join("node_modules").join("@deepseek-ai").join("dsh").join("index.js"), "dsh").unwrap();
+        fs::create_dir_all(prefix.join("node_modules").join("user-plugin")).unwrap();
+        fs::write(prefix.join("node_modules").join("user-plugin").join("client.js"), "user").unwrap();
+
+        let dir = backup_dsh_config_at(&home, &prefix, &backup_root)
+            .unwrap()
+            .expect("应产生备份目录");
+        assert!(dir.join("settings.yaml").exists());
+        assert!(dir.join("profiles").join("web").join("cordis.patch.yml").exists());
+        assert!(
+            !dir.join("profiles").join("web").join("node_modules").exists(),
+            "node_modules 不应被备份（依赖可重建）"
+        );
+        assert!(dir.join("user-plugins").join("user-plugin").join("client.js").exists());
+        assert!(
+            !dir.join("user-plugins").join("@deepseek-ai").join("dsh").exists(),
+            "DSH 本体不应被备份"
+        );
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn backup_prunes_to_max_kept() {
+        let base = std::env::temp_dir().join(format!("whalito-prune-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let home = base.join("home");
+        let prefix = base.join("prefix");
+        let backup_root = base.join("backup");
+        fs::create_dir_all(&home).unwrap();
+        fs::create_dir_all(&prefix).unwrap();
+        fs::write(home.join("settings.yaml"), "k: v\n").unwrap();
+        // 连续备份 MAX_BACKUPS + 3 次（时间戳秒级可能相同，插入等待即可稳定）。
+        for _ in 0..(MAX_BACKUPS + 3) {
+            backup_dsh_config_at(&home, &prefix, &backup_root).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(1100));
+        }
+        let kept = fs::read_dir(&backup_root)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with("dsh-backup-"))
+            .count();
+        assert_eq!(kept, MAX_BACKUPS, "旧备份应被清理，只保留最近 {MAX_BACKUPS} 份");
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn backup_returns_none_when_nothing_to_backup() {
+        let base = std::env::temp_dir().join(format!("whalito-none-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let home = base.join("home");
+        let prefix = base.join("prefix");
+        let backup_root = base.join("backup");
+        fs::create_dir_all(&home).unwrap();
+        fs::create_dir_all(&prefix).unwrap();
+        assert!(backup_dsh_config_at(&home, &prefix, &backup_root).unwrap().is_none());
+        let _ = fs::remove_dir_all(&base);
     }
 }

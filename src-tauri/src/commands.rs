@@ -516,6 +516,21 @@ fn install_dsh_inner(app: &AppHandle, shared: &Shared, spec: &str) -> Result<Env
         .clone()
         .ok_or("无法确定安装目录，请先安装 Node.js。".to_string())?;
 
+    // 安装/更新前备份 DSH 配置与用户插件（best-effort，失败不阻断安装）。
+    match crate::settings_plugin::backup_dsh_config(app) {
+        Ok(Some(backup_dir)) => state::push_log(
+            &shared.logs,
+            &format!(
+                "[系统] 已备份 DSH 配置与用户插件到 {}（若安装后出现问题可从这里恢复）",
+                backup_dir.display()
+            ),
+        ),
+        Ok(None) => {
+            state::push_log(&shared.logs, "[系统] 无可备份的 DSH 配置，跳过备份");
+        }
+        Err(e) => state::push_log(&shared.logs, &format!("[系统] DSH 配置备份失败（不影响安装）：{e}")),
+    }
+
     // 应用目录专用：重装 DSH 本体。不能整目录 remove_dir_all——
     // install_prefix 是 npm 全局前缀，用户可能在这里手动 `npm install -g
     // --prefix <install_prefix> <插件>` 装过第三方插件，整目录清空会连插件
