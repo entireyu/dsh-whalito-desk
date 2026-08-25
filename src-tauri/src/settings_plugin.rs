@@ -1,6 +1,6 @@
-//! 鲸仔设置分区插件同步：把内嵌的 DSH 客户端插件包幂等写入 web profile
+//! 鲸仔设置分区插件同步：把内置的 DSH 客户端插件包等内容写入 web profile
 //! （node_modules + cordis.patch.yml 标记块）。所有维护动作只发生在标记块内，
-//! 标记块外的用户内容绝不改动。不动 deepseek-harness 源码。
+//! 标记块外的用户内容绝不动。不改动 deepseek-harness 源码。
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -10,18 +10,45 @@ use tauri::{AppHandle, Manager};
 
 use crate::state::{push_log, AppState};
 
-/// 插件包名（同时是 cordis 条目名与 node_modules 下的目录名）。
-pub const PKG_NAME: &str = "@entireyu/whalito-dsh-settings";
-/// 内嵌插件文件（编译期携带；运行时按内容比对同步，无需外部依赖）。
-const PKG_FILES: &[(&str, &str)] = &[
-    ("package.json", include_str!("../whalito-dsh-settings/package.json")),
-    ("index.js", include_str!("../whalito-dsh-settings/index.js")),
-    ("client.js", include_str!("../whalito-dsh-settings/client.js")),
+/// 一个内置插件包：cordis 条目 id、包名（同时是 node_modules 下的目录名）、
+/// 编译期嵌入的文件清单。
+pub struct PkgSpec {
+    pub id: &'static str,
+    pub name: &'static str,
+    pub files: &'static [(&'static str, &'static str)],
+}
+
+/// 内置插件包清单：鲸仔设置分区 + WebUI+ 增强。数组顺序即 patch.yml 中
+/// insert 行的顺序；修改文件内容无需改这里（include_str! 编译期自动跟随）。
+pub const PKGS: &[PkgSpec] = &[
+    PkgSpec {
+        id: "whalito-settings",
+        name: "@entireyu/whalito-dsh-settings",
+        files: &[
+            ("package.json", include_str!("../whalito-dsh-settings/package.json")),
+            ("index.js", include_str!("../whalito-dsh-settings/index.js")),
+            ("client.js", include_str!("../whalito-dsh-settings/client.js")),
+        ],
+    },
+    PkgSpec {
+        id: "dsh-webui-plus",
+        name: "@entireyu/dsh-webui-plus",
+        files: &[
+            ("package.json", include_str!("../dsh-webui-plus/package.json")),
+            ("index.js", include_str!("../dsh-webui-plus/index.js")),
+            ("client.js", include_str!("../dsh-webui-plus/client.js")),
+        ],
+    },
 ];
 
 /// cordis.patch.yml 中的托管标记：同步只替换/追加这两个标记之间的块。
 const MARK_BEGIN: &str = "# ⟪ whalito-managed begin ⟫";
 const MARK_END: &str = "# ⟪ whalito-managed end ⟫";
+/// 旧版（≤0.4.6 测试构建）写入时的损坏标记：源码 `⟪`（U+27EA）在旧写入
+/// 链路里变成 `隡`（U+96A1）。新版同步时识别并统一替换为标准标记，避免
+/// 出现两个标记块（重复 insert 同一插件）。
+const LEGACY_MARK_BEGIN: &str = "# 隡 whalito-managed begin 隡";
+const LEGACY_MARK_END: &str = "# 隡 whalito-managed end 隡";
 
 /// 同步结果（installed=已就绪无变化 / updated=有写入 / skipped=跳过）。
 #[derive(Serialize, Clone)]
@@ -54,12 +81,19 @@ pub fn profile_dir() -> PathBuf {
     dsh_home().join("profiles").join("web")
 }
 
-/// 生成托管的 cordis.patch.yml 标记块。
+/// 生成托管的 cordis.patch.yml 标记块：每个插件包一行 insert。
 fn managed_block() -> String {
-    format!(
-        "{}\n- insert:\n    - id: whalito-settings\n      name: '{}'\n{}\n",
-        MARK_BEGIN, PKG_NAME, MARK_END
-    )
+    let mut lines = String::from(MARK_BEGIN);
+    for pkg in PKGS {
+        lines.push_str(&format!(
+            "\n- insert:\n    - id: {}\n      name: '{}'",
+            pkg.id, pkg.name
+        ));
+    }
+    lines.push('\n');
+    lines.push_str(MARK_END);
+    lines.push('\n');
+    lines
 }
 
 /// 判断现有补丁层是否为"仅空列表"（新 profile 默认内容：注释 + `[]`）。
@@ -77,10 +111,15 @@ fn bare_empty_list(existing: &str) -> bool {
     items.len() == 1 && items[0] == "[]"
 }
 
-/// 在标记块内 upsert 插件 insert 行：两个标记都存在则整块替换；
+/// 在标记块内 upsert 插件 insert 行：两个标记都存在则整块替换，
 /// 否则追加——若文件是"仅空列表"则把 `[]` 就地替换为块（避免
 /// flow 序列后接 block 条目的 YAML 语法错误）。标记块外内容原样保留。
+///
+/// 兼容旧版损坏标记：旧测试构建把 `⟪` 写成了 `隡`，先把它们规范化为
+/// 标准标记再处理，保证新旧版本间幂等、不产生重复标记块。
 pub fn upsert_marker_block(existing: &str) -> String {
+    let normalized = existing.replace(LEGACY_MARK_BEGIN, MARK_BEGIN).replace(LEGACY_MARK_END, MARK_END);
+    let existing = &normalized;
     match (existing.find(MARK_BEGIN), existing.find(MARK_END)) {
         (Some(begin), Some(end)) if end > begin => {
             let tail_start = match existing[end..].find('\n') {
@@ -110,28 +149,31 @@ pub fn upsert_marker_block(existing: &str) -> String {
     }
 }
 
-/// 把内嵌插件文件写入 profile 的 node_modules；按内容比对，返回是否有写入。
+/// 把内置插件文件写入 profile 的 node_modules；按内容比对，返回是否有写入。
 pub fn sync_package_files(profile: &Path) -> Result<bool, String> {
-    let pkg_dir = profile.join("node_modules").join(PKG_NAME);
     let mut changed = false;
-    for (name, content) in PKG_FILES {
-        let path = pkg_dir.join(name);
-        let same = fs::read_to_string(&path)
-            .map(|c| c == *content)
-            .unwrap_or(false);
-        if same {
-            continue;
+    for pkg in PKGS {
+        let pkg_dir = profile.join("node_modules").join(pkg.name);
+        for (name, content) in pkg.files {
+            let path = pkg_dir.join(name);
+            let same = fs::read_to_string(&path)
+                .map(|c| c == *content)
+                .unwrap_or(false);
+            if same {
+                continue;
+            }
+            fs::create_dir_all(&pkg_dir)
+                .map_err(|e| format!("创建插件目录 {} 失败：{e}", pkg_dir.display()))?;
+            fs::write(&path, *content)
+                .map_err(|e| format!("写入插件文件 {} 失败：{e}", path.display()))?;
+            changed = true;
         }
-        fs::create_dir_all(&pkg_dir)
-            .map_err(|e| format!("创建插件目录 {} 失败：{e}", pkg_dir.display()))?;
-        fs::write(&path, *content)
-            .map_err(|e| format!("写入插件文件 {} 失败：{e}", path.display()))?;
-        changed = true;
     }
     Ok(changed)
 }
 
 /// 维护 cordis.patch.yml 标记块；返回是否有写入。
+/// 显式以 UTF-8 编码写入，杜绝旧版把 `⟪` 写成 `隡` 的编码损坏。
 pub fn sync_patch_layer(profile: &Path) -> Result<bool, String> {
     let path = profile.join("cordis.patch.yml");
     let current = if path.exists() {
@@ -164,9 +206,10 @@ pub fn ensure_settings_plugin(app: &AppHandle) -> Result<PluginSyncReport, Strin
         let files_changed = sync_package_files(&profile)?;
         let patch_changed = sync_patch_layer(&profile)?;
         let status = if files_changed || patch_changed { "updated" } else { "installed" };
+        let names: Vec<String> = PKGS.iter().map(|p| p.name.to_string()).collect();
         Ok(PluginSyncReport {
             status: status.into(),
-            detail: format!("插件包已就绪（{}）", PKG_NAME),
+            detail: format!("插件包已就绪（{}）", names.join("、")),
             profile_dir: profile_str.clone(),
         })
     })() {
@@ -212,6 +255,15 @@ pub fn bridge_diag(line: String) {
 mod tests {
     use super::*;
 
+    fn block_has_all_pkgs(block: &str) -> bool {
+        for pkg in PKGS {
+            if !block.contains(&format!("name: '{}'", pkg.name)) {
+                return false;
+            }
+        }
+        true
+    }
+
     #[test]
     fn appends_block_when_markers_absent() {
         let input = "# 用户自己的注释\n- id: some-other\n  name: 'x'\n";
@@ -219,8 +271,10 @@ mod tests {
         assert!(out.starts_with(input));
         assert!(out.contains(MARK_BEGIN));
         assert!(out.contains(MARK_END));
+        assert!(block_has_all_pkgs(&out));
+        // 每个包都有对应 id 行（name 去掉 scope 前缀）。
         assert!(out.contains("id: whalito-settings"));
-        assert!(out.contains("name: '@entireyu/whalito-dsh-settings'"));
+        assert!(out.contains("id: dsh-webui-plus"));
     }
 
     #[test]
@@ -234,7 +288,7 @@ mod tests {
         assert!(out.starts_with("# 前文\n"));
         assert!(out.ends_with("# 后文\n"));
         assert!(!out.contains("name: 'stale'"));
-        assert!(out.contains("name: '@entireyu/whalito-dsh-settings'"));
+        assert!(block_has_all_pkgs(&out));
         assert_eq!(out.matches(MARK_BEGIN).count(), 1);
         assert_eq!(out.matches(MARK_END).count(), 1);
     }
@@ -246,7 +300,7 @@ mod tests {
         assert!(!out.contains("[]"));
         assert!(out.contains(MARK_BEGIN));
         assert!(out.contains("- insert:"));
-        assert!(out.contains("id: whalito-settings"));
+        assert!(block_has_all_pkgs(&out));
         assert!(out.starts_with("# Your patch layer"));
     }
 
@@ -256,7 +310,7 @@ mod tests {
         let out = upsert_marker_block(input);
         assert!(out.starts_with(input));
         assert!(out.contains(MARK_BEGIN));
-        assert!(out.contains("id: whalito-settings"));
+        assert!(block_has_all_pkgs(&out));
     }
 
     #[test]
@@ -268,15 +322,34 @@ mod tests {
     }
 
     #[test]
+    fn normalizes_legacy_corrupted_marker() {
+        // 旧版测试构建把 `⟪` 写成 `隡`：同步时应整体替换为标准标记块，
+        // 且不残留旧标记（避免两个标记块重复 insert）。
+        let legacy = format!(
+            "# 隡 whalito-managed begin 隡\n- insert:\n    - id: whalito-settings\n      name: 'old'\n# 隡 whalito-managed end 隡\n"
+        );
+        let out = upsert_marker_block(&legacy);
+        assert!(!out.contains('隡'), "旧损坏标记应被清除：{out}");
+        assert_eq!(out.matches(MARK_BEGIN).count(), 1);
+        assert_eq!(out.matches(MARK_END).count(), 1);
+        assert!(block_has_all_pkgs(&out));
+        assert!(!out.contains("name: 'old'"));
+        // 幂等：二次处理结果不变。
+        assert_eq!(upsert_marker_block(&out), out);
+    }
+
+    #[test]
     fn sync_package_files_roundtrip() {
         let base = std::env::temp_dir().join(format!("whalito-sync-test-{}", std::process::id()));
         let profile = base.join("profiles").join("web");
         let _ = fs::remove_dir_all(&base);
         assert!(sync_package_files(&profile).unwrap());
         assert!(!sync_package_files(&profile).unwrap());
-        for (name, content) in PKG_FILES {
-            let path = profile.join("node_modules").join(PKG_NAME).join(name);
-            assert_eq!(fs::read_to_string(&path).unwrap(), *content);
+        for pkg in PKGS {
+            for (name, content) in pkg.files {
+                let path = profile.join("node_modules").join(pkg.name).join(name);
+                assert_eq!(fs::read_to_string(&path).unwrap(), *content);
+            }
         }
         let _ = fs::remove_dir_all(&base);
     }

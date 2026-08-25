@@ -1,0 +1,33 @@
+{
+  "name": "@entireyu/dsh-webui-plus",
+  "version": "0.1.0",
+  "private": false,
+  "description": "DSH WebUI+ 增强插件：模型供应商展示、单轮耗时与 token、编辑并重发、失败重试与详细错误",
+  "type": "module",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "LICENSE"
+  ],
+  "dsh": {
+    "client": {
+      "platform": "web"
+    }
+  },
+  "scripts": {
+    "test": "node test/load-smoke.mjs",
+    "check": "node --check client.js && node --check index.js"
+  },
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "webui",
+    "plugin"
+  ],
+  "license": "MIT"
+}

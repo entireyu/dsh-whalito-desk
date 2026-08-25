@@ -4,6 +4,15 @@
 
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.4.7] - 2026-08-25
+
+### 新增
+- 预置 WebUI+ 增强插件（`@entireyu/dsh-webui-plus`）：随鲸仔启动同步到 web profile 的 `node_modules` 与 `cordis.patch.yml`（与既有鲸仔设置分区同一托管标记块，双插件共存）；设置页新增插件版本徽标、GitHub 链接与鲸仔推荐卡片（`whalito.jniantic.cn`）。
+
+### 修复
+- 修复内嵌 DSH 页面的外部链接无法用默认浏览器打开：`window.open` 在 Tauri WebView 的跨源 iframe 中会被拦截，改为经鲸仔桥 `postMessage(open-url)` → 父窗口 `open_url` 命令 → 系统默认浏览器（普通浏览器环境自动回退 `window.open`）。
+- 修复旧版测试构建把托管标记 `⟪` 写成 `隡` 的编码损坏：同步时识别旧标记并统一替换为标准标记，避免 cordis.patch.yml 出现两个托管块重复 insert。
+
 ## [0.4.6] - 2026-08-20
 
 ### 新增
