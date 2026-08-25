@@ -196,15 +196,21 @@
        *    → 系统默认浏览器。
        *  - 普通浏览器（DSH 原生 web / 直接访问 30080）：回退 window.open。
        */
+      function isEmbeddedCrossOrigin() {
+        try {
+          if (window.parent === window || window.parent === null) return false;
+          if (window.location.origin === window.parent.location.origin) return false;
+          return true;
+        } catch (err) {
+          // 跨源读取 parent.origin 会抛 SecurityError → 必然被嵌入跨源 iframe。
+          return window.parent !== window && window.parent !== null;
+        }
+      }
+
       function openExternal(url) {
         if (typeof url !== 'string' || url === '') return;
         try {
-          // 检测是否被嵌入跨源 iframe（window.parent 存在且 origin 与自身不同）。
-          var embedded = false;
-          try {
-            embedded = window.parent !== window && window.parent !== null && window.location.origin !== window.parent.location.origin;
-          } catch (err) { embedded = true; } // 跨源读取 parent.origin 会抛错 → 必然被嵌入
-          if (embedded) {
+          if (isEmbeddedCrossOrigin()) {
             window.parent.postMessage({
               channel: 'whalito',
               type: 'action',
@@ -217,6 +223,37 @@
         try {
           window.open(url, '_blank', 'noopener');
         } catch (err) { /* 弹窗被拦截时忽略 */ }
+      }
+
+      /**
+       * 全局外部链接拦截（仅鲸仔内嵌环境安装）：
+       *  DSH 原生把对话中的网址渲染为 <a target="_blank" rel="noopener noreferrer">，
+       *  在跨源 iframe 里点击会被 Tauri WebView 拦截（无反应）。这里用捕获阶段
+       *  监听文档级 click，拦截所有 target=_blank 的 <a>，改走 openExternal 桥通道。
+       *  普通浏览器不安装，保持原生行为。返回卸载函数。
+       */
+      function installExternalLinkCapture() {
+        if (typeof window === 'undefined' || typeof window.document === 'undefined') return function () {};
+        if (!isEmbeddedCrossOrigin()) return function () {};
+        function onClick(e) {
+          var target = e && e.target;
+          var el = target instanceof window.HTMLElement ? target : null;
+          while (el !== null && el.tagName !== 'A') el = el.parentElement;
+          if (el === null || el.tagName !== 'A') return;
+          var href = el.getAttribute && el.getAttribute('href');
+          if (typeof href !== 'string' || href === '') return;
+          var isExternal = href.indexOf('://') !== -1 || href.indexOf('//') === 0;
+          if (!isExternal) return;
+          var wantsBlank = el.target === '_blank' || el.getAttribute('target') === '_blank';
+          if (!wantsBlank) return;
+          e.preventDefault();
+          e.stopPropagation();
+          openExternal(href);
+        }
+        window.document.addEventListener('click', onClick, true);
+        return function () {
+          window.document.removeEventListener('click', onClick, true);
+        };
       }
 
       /** 一行 caption 的样式。 */
@@ -726,7 +763,7 @@
       // ── 功能 5：设置页（settings.section）+ 鲸仔推荐位 ───────────────────────
       // ── 功能 4：设置页（settings.section）+ 鲸仔推荐位 ───────────────────────
       // 插件版本（与 package.json version 同步；发布新版本时两处需一致）。
-      var PLUGIN_VERSION = '0.1.0';
+      var PLUGIN_VERSION = '0.1.2';
       var PLUGIN_GITHUB = 'https://github.com/entireyu/dsh-webui-plus';
       // 自绘 Switch 开关（DSH 前端无原生 Switch 组件，需自绘）：
       //   - 语义：<button role="switch" aria-checked>，轨道 + 滑块，CSS transition
@@ -1781,6 +1818,14 @@
         workspacesFace = ctx.get('workspaces') || null;
         var slots = ctx.get('slots');
         if (slots === undefined) return;
+
+        // 全局外部链接捕获（仅鲸仔内嵌环境生效）：对话/搜索结果里的
+        // <a target="_blank"> 点击在跨源 iframe 中会被 Tauri WebView 拦截，
+        // 捕获阶段统一改走桥通道 → 系统默认浏览器。
+        var uninstallLinks = installExternalLinkCapture();
+        if (typeof ctx.on === 'function') {
+          ctx.on('dispose', uninstallLinks);
+        }
 
         // 功能 2/3/4：每轮完成后的尾部扩展链（首个且唯一条目，每轮都挂载）。
         slots.inject('conversation.chat.turnTail', function () {
