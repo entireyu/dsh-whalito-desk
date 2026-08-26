@@ -354,7 +354,9 @@ pub fn dsh_path_toggle(
             let path = mac_user_file();
             let content = fs::read_to_string(&path).unwrap_or_default();
             let block = format!("export PATH=\"{entry_s}:$PATH\"");
-            let patched = patch_zshrc(&content, &block, !enable);
+            // patch_zshrc：present=true 追加块（注册）、false 移除块（注销）——
+            // 与 enable 语义一致，直接传 enable。
+            let patched = patch_zshrc(&content, &block, enable);
             if patched != content {
                 if let Some(dir) = path.parent() {
                     let _ = fs::create_dir_all(dir);
@@ -387,15 +389,17 @@ mod tests {
 
     #[test]
     fn merge_path_adds_and_removes_entry() {
+        // 路径刻意不含分隔符字符（Windows ';' / 其他 ':'），避免 macOS 上
+        // 盘符冒号被 split 拆碎导致断言平台相关。
         let sep = path_sep();
-        let current = format!("C:\\Windows{sep}C:\\Users\\me\\bin");
-        let entry = "C:\\Users\\me\\AppData\\Local\\dsh-launcher\\npm";
+        let current = format!("opt{sep}bin");
+        let entry = "usr/local/dsh/npm";
         let added = merge_path(&current, entry, false);
         assert!(added.contains(entry));
         assert_eq!(added.matches(entry).count(), 1);
         assert_eq!(merge_path(&added, entry, false), added);
         let removed = merge_path(&added, entry, true);
-        assert!(!removed.contains("dsh-launcher"));
+        assert!(!removed.contains("dsh"));
         assert_eq!(removed, current);
         assert_eq!(merge_path("", entry, false), entry.to_string());
         assert_eq!(merge_path(&current, entry, true), current);
@@ -404,13 +408,13 @@ mod tests {
     #[test]
     fn merge_path_dedupes_trailing_separator_and_case() {
         let sep = path_sep();
-        let entry = "C:\\MY\\PATH";
-        let current = format!("C:\\my\\path\\{sep}C:\\other");
+        let entry = "MY/PATH";
+        let current = format!("my/path/{sep}other");
         let added = merge_path(&current, entry, false);
-        assert_eq!(added.matches("my\\path").count(), 1);
+        assert_eq!(added.matches("my/path").count(), 1);
         let removed = merge_path(&current, entry, true);
-        assert!(!removed.to_lowercase().contains("my\\path"));
-        assert!(removed.contains("C:\\other"));
+        assert!(!removed.to_lowercase().contains("my/path"));
+        assert!(removed.contains("other"));
     }
 
     #[test]
@@ -425,12 +429,13 @@ mod tests {
     fn patch_zshrc_upserts_and_removes_block() {
         let block = "export PATH=\"/tmp/x/bin:$PATH\"";
         let base = "# existing\nPATH=/usr/bin\n";
-        let added = patch_zshrc(base, block, false);
+        // present=true 追加块（注册），present=false 移除块（注销）。
+        let added = patch_zshrc(base, block, true);
         assert!(added.contains(MAC_MARK_BEGIN));
         assert!(added.contains(block));
         assert!(added.starts_with("# existing"));
-        assert_eq!(patch_zshrc(&added, block, false), added);
-        let removed = patch_zshrc(&added, block, true);
+        assert_eq!(patch_zshrc(&added, block, true), added);
+        let removed = patch_zshrc(&added, block, false);
         assert!(!removed.contains(MAC_MARK_BEGIN));
         assert!(!removed.contains("export PATH=\"/tmp/x/bin"));
         assert!(removed.contains("# existing"));

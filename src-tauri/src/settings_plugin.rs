@@ -185,8 +185,15 @@ fn backup_dsh_config_at(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis())
         .unwrap_or(0);
-    // 毫秒级命名：避免同一秒内连续两次备份同名目录（合并/剪枝计数出错）。
-    let dir = backup_root.join(format!("dsh-backup-{millis}"));
+    // 毫秒级命名避免同一秒内同名；极端场景（同毫秒连续两次备份，CI 快速循环
+    // 可能触发）追加序号保证目录唯一，否则同名目录会被合并、剪枝计数出错。
+    let base_name = format!("dsh-backup-{millis}");
+    let mut dir = backup_root.join(&base_name);
+    let mut seq = 2u32;
+    while dir.exists() {
+        dir = backup_root.join(format!("{base_name}-{seq}"));
+        seq += 1;
+    }
     fs::create_dir_all(&dir).map_err(|e| format!("创建备份目录 {} 失败：{e}", dir.display()))?;
     let mut copied = 0usize;
 
