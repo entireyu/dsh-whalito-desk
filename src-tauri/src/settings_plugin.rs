@@ -908,7 +908,10 @@ mod tests {
             fs::create_dir_all(&target).unwrap();
             fs::write(target.join("package.json"), r#"{"name":"x","version":"9.9.9"}"#).unwrap();
             std::os::unix::fs::symlink(&target, &pkg_dir).unwrap();
-            // 符号链接存在：同步必须整体跳过，不写任何文件。
+            // 第一次：PKGS[0]（whalito-settings，非符号链接）尚未安装会正常写入
+            //（changed=true）；PKGS[1]（webui-plus 的符号链接目录）必须跳过。
+            assert!(sync_package_files(&profile).unwrap());
+            // 第二次：内容已一致 → 无写入（符号链接包依旧跳过），返回 changed=false。
             assert!(!sync_package_files(&profile).unwrap());
             assert_eq!(
                 fs::read_to_string(target.join("package.json")).unwrap(),
