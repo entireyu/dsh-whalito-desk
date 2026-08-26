@@ -205,6 +205,26 @@ body {
   padding: 12px 14px;
 }
 
+/* 管理后台：插件市场状态行（dsh-market 预装状态 + 检查/重装） */
+.market-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  padding: 8px 14px;
+  background: var(--panel);
+  border: 1px dashed var(--border);
+  border-radius: 12px;
+}
+.market-row .hint {
+  margin: 0;
+  flex: 1 1 auto;
+}
+.market-row b {
+  color: var(--text);
+}
+
 /* 运行日志条数 */
 .logs-count {
   color: var(--muted);

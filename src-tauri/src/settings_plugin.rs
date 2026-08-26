@@ -16,10 +16,17 @@ pub struct PkgSpec {
     pub id: &'static str,
     pub name: &'static str,
     pub files: &'static [(&'static str, &'static str)],
+    /// 鲸仔独占托管的包（private、用户无法通过任何途径手动安装/升级）：
+    /// 同步按**内容比对**覆盖，不依赖版本号——避免「改了内嵌内容但忘了升
+    /// package.json 版本」时，版本感知（磁盘 ≥ 内置则跳过）导致改动永远
+    /// 推不出去的坑。对外可安装的包（npm 发布）必须保持版本感知。
+    pub force_sync: bool,
 }
 
 /// 内置插件包清单：鲸仔设置分区 + WebUI+ 增强。数组顺序即 patch.yml 中
 /// insert 行的顺序；修改文件内容无需改这里（include_str! 编译期自动跟随）。
+/// 注意：**改了 whalito-settings 的内容后仍应同步提升其 package.json 版本**
+/// （版本是用户可见/可诊断的推送信号）；force_sync 只是兜底，不是偷懒借口。
 pub const PKGS: &[PkgSpec] = &[
     PkgSpec {
         id: "whalito-settings",
@@ -29,6 +36,7 @@ pub const PKGS: &[PkgSpec] = &[
             ("index.js", include_str!("../whalito-dsh-settings/index.js")),
             ("client.js", include_str!("../whalito-dsh-settings/client.js")),
         ],
+        force_sync: true,
     },
     PkgSpec {
         id: "dsh-webui-plus",
@@ -38,8 +46,15 @@ pub const PKGS: &[PkgSpec] = &[
             ("index.js", include_str!("../dsh-webui-plus/index.js")),
             ("client.js", include_str!("../dsh-webui-plus/client.js")),
         ],
+        force_sync: false,
     },
 ];
+
+/// 可禁用的内置插件 id 清单（patch 层 `- id: xxx` + `disabled: true` 覆盖行）。
+/// - dsh-webui-plus：鲸仔托管（patch 层 insert），禁用 = 标记块生成 disabled 覆盖行
+/// - dsh-market：插件市场（bundle 层，dsh plugin 安装），禁用 = 同样覆盖行
+/// whalito-settings 不在其中：禁用它即失去「鲸仔设置」入口，永不提供禁用。
+pub const DISABLEABLE_IDS: &[&str] = &["dsh-webui-plus", "dsh-market"];
 
 /// cordis.patch.yml 中的托管标记：同步只替换/追加这两个标记之间的块。
 const MARK_BEGIN: &str = "# ⟪ whalito-managed begin ⟫";
@@ -248,19 +263,108 @@ fn backup_dsh_config_at(
     Ok(Some(dir))
 }
 
-/// 生成托管的 cordis.patch.yml 标记块：每个插件包一行 insert。
-fn managed_block() -> String {
+/// 读取 profile 的 `dsh.profile.bundles`（dsh plugin 维护的层列表，权威的
+/// 「bundle 层已装插件」来源）。文件缺失/解析失败返回空列表。
+pub fn installed_bundles(profile: &Path) -> Vec<String> {
+    let path = profile.join("package.json");
+    let Ok(text) = fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return Vec::new();
+    };
+    v.get("dsh")
+        .and_then(|d| d.get("profile"))
+        .and_then(|p| p.get("bundles"))
+        .and_then(|b| b.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// 生成托管的 cordis.patch.yml 标记块：
+/// - 未禁用的托管插件：一行 insert；
+/// - 已禁用的托管插件：**insert 行保留 + 追加 `- id: xxx` + `disabled: true` 覆盖行**
+///   （cordis patch 顶层条目是「按 id 覆盖已有行」，没有 insert 创建的行就匹配
+///   不到 → 禁用无效且 loader 警告；insert 创建行后覆盖行才能禁用）；
+/// - 不在 PKGS 中的可禁用插件（dsh-market：bundle 层行已存在）→ 只需覆盖行；
+/// - R1：PKGS 同名包已在 bundle 层**真正激活**（bundles 列出且包声明 dsh.bundle，
+///   由调用方算出 active_bundles）→ 跳过 insert，避免同一插件两层各加载一次。
+fn managed_block(disabled_ids: &[&str], active_bundles: &[String]) -> String {
     let mut lines = String::from(MARK_BEGIN);
     for pkg in PKGS {
+        if active_bundles.iter().any(|b| b == pkg.name) {
+            // bundle 层已激活（用户 dsh plugin 安装的同名 bundle 包），标记块不重复 insert。
+            continue;
+        }
         lines.push_str(&format!(
             "\n- insert:\n    - id: {}\n      name: '{}'",
             pkg.id, pkg.name
         ));
+        if disabled_ids.contains(&pkg.id) {
+            lines.push_str(&format!("\n- id: {}\n  disabled: true", pkg.id));
+        }
+    }
+    // 不在 PKGS 中的可禁用插件（dsh-market：bundle 层行由包自身 insert，覆盖即可）。
+    for extra in DISABLEABLE_IDS {
+        if disabled_ids.contains(extra) && !PKGS.iter().any(|p| p.id == *extra) {
+            lines.push_str(&format!("\n- id: {}\n  disabled: true", extra));
+        }
     }
     lines.push('\n');
     lines.push_str(MARK_END);
     lines.push('\n');
     lines
+}
+
+/// bundle 层是否真的激活了该包：bundles 列出**且**包声明 `dsh.bundle`。
+/// 普通依赖（只有 dsh.client 或没有 dsh 声明）不会在 bundle 层 insert 任何行，
+/// 与标记块托管不冲突，不能据此跳过鲸仔的 insert（否则 WebUI+ 会凭空消失）。
+fn bundle_layer_active(profile: &Path, name: &str) -> bool {
+    let pkg_json = profile.join("node_modules").join(name).join("package.json");
+    let Ok(text) = fs::read_to_string(&pkg_json) else {
+        return false;
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return false;
+    };
+    v.get("dsh").and_then(|d| d.get("bundle")).is_some()
+}
+
+/// 计算「bundle 层真正激活」的包名集合（供 managed_block 的 R1 判定）。
+fn active_bundles(profile: &Path) -> Vec<String> {
+    installed_bundles(profile)
+        .into_iter()
+        .filter(|b| bundle_layer_active(profile, b))
+        .collect()
+}
+
+/// 解析现有 patch 中的禁用条目（顶格 `- id: <可禁用 id>` + 下一行 `disabled: true`）。
+/// 只认鲸仔可管理的 id；insert 块里的缩进 `- id:` 行不会误判。
+fn parse_disabled_ids(existing: &str) -> Vec<String> {
+    let lines: Vec<&str> = existing.lines().collect();
+    let mut out: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i + 1 < lines.len() {
+        let t = lines[i].trim();
+        if t.starts_with("- id:") {
+            // 顶格条目（insert 块的子行带缩进，不匹配）。
+            let raw = t["- id:".len()..].trim();
+            let id_val = raw.trim_matches('\'').trim_matches('"').to_string();
+            let manageable = DISABLEABLE_IDS.contains(&id_val.as_str())
+                || PKGS.iter().any(|p| p.id == id_val);
+            if manageable && lines[i + 1].trim().starts_with("disabled: true") {
+                if !out.contains(&id_val) {
+                    out.push(id_val);
+                }
+            }
+        }
+        i += 1;
+    }
+    out
 }
 
 /// 判断现有补丁层是否为"仅空列表"（新 profile 默认内容：注释 + `[]`）。
@@ -344,25 +448,48 @@ fn dedupe_managed_dups(existing: &str) -> String {
     out.join("\n")
 }
 
-/// 在标记块内 upsert 插件 insert 行：两个标记都存在则整块替换，
-/// 否则追加——若文件是"仅空列表"则把 `[]` 就地替换为块（避免
+/// 在标记块内 upsert 插件条目（insert / disabled 覆盖行）：两个标记都存在则
+/// 整块替换，否则追加——若文件是"仅空列表"则把 `[]` 就地替换为块（避免
 /// flow 序列后接 block 条目的 YAML 语法错误）。标记块外内容原样保留。
+///
+/// 禁用状态从现有文件解析（标记块内的 `- id:` + `disabled: true` 行），
+/// 因此禁用/启用切换后再次同步保持幂等。
 ///
 /// 兼容旧版损坏标记：旧测试构建把 `⟪` 写成了 `隡`，先把它们规范化为
 /// 标准标记再处理，保证新旧版本间幂等、不产生重复标记块。
 /// 最后清理标记块外与托管插件重复的 insert 条目（升级残留去重）。
 pub fn upsert_marker_block(existing: &str) -> String {
+    upsert_marker_block_with(existing, &[], &[])
+}
+
+/// upsert 的完整形态：bundles = profile 的 bundle 层列表（R1：同名包已在
+/// bundle 层 → 标记块跳过 insert）；forced_disabled = 调用方显式指定的禁用
+/// 列表（toggle 命令用；同步流程传空、从现有文件解析）。
+pub fn upsert_marker_block_with(existing: &str, bundles: &[String], forced_disabled: &[String]) -> String {
     let normalized = existing.replace(LEGACY_MARK_BEGIN, MARK_BEGIN).replace(LEGACY_MARK_END, MARK_END);
     let existing = &normalized;
+    let mut disabled_ids = parse_disabled_ids(existing);
+    for id in forced_disabled {
+        if !disabled_ids.contains(id) {
+            disabled_ids.push(id.clone());
+        }
+    }
+    let block = managed_block(&disabled_ids.iter().map(|s| s.as_str()).collect::<Vec<_>>(), bundles);
+    replace_marker_block(existing, &block)
+}
+
+/// 用给定标记块内容替换/追加标记区间（不做禁用解析）；标记块外内容原样保留。
+/// 供 toggle 命令用「权威禁用列表」重建标记块（避免 upsert 重新解析旧行）。
+pub fn replace_marker_block(existing: &str, block: &str) -> String {
     let merged = match (existing.find(MARK_BEGIN), existing.find(MARK_END)) {
         (Some(begin), Some(end)) if end > begin => {
             let tail_start = match existing[end..].find('\n') {
                 Some(i) => end + i + 1,
                 None => existing.len(),
             };
-            let mut out = String::with_capacity(existing.len() + managed_block().len());
+            let mut out = String::with_capacity(existing.len() + block.len());
             out.push_str(&existing[..begin]);
-            out.push_str(&managed_block());
+            out.push_str(block);
             out.push_str(&existing[tail_start..]);
             out
         }
@@ -373,11 +500,16 @@ pub fn upsert_marker_block(existing: &str) -> String {
             }
             if bare_empty_list(existing) {
                 if let Some(pos) = out.find("[]") {
-                    out.replace_range(pos..pos + 2, &managed_block());
+                    // 一并吞掉 `[]` 后的换行，与「替换区间」分支的结尾一致（单 \n）。
+                    let mut end = pos + 2;
+                    if out.as_bytes().get(end) == Some(&b'\n') {
+                        end += 1;
+                    }
+                    out.replace_range(pos..end, block);
                     return out;
                 }
             }
-            out.push_str(&managed_block());
+            out.push_str(block);
             out
         }
     };
@@ -398,27 +530,43 @@ fn pkg_version(package_json: &str) -> Option<(u64, u64, u64)> {
 }
 
 /// 把内置插件文件写入 profile 的 node_modules；按内容比对，返回是否有写入。
-/// 版本感知：磁盘上已存在版本 ≥ 内置版本的包 → 整体跳过（尊重用户手动安装/
-/// 升级的插件，升级鲸仔不降级覆盖用户内容）；仅当磁盘版本更低或未安装时才
-/// 写入内置版本（保证鲸仔托管的新版本仍能推送）。
+/// 同步策略按包分两种：
+/// - `force_sync`（鲸仔独占托管、private 不可手动安装的包，如 whalito-settings）：
+///   **内容比对覆盖**，不依赖版本号——改了内嵌内容即使忘了升版本也会推送，
+///   彻底绕开「版本没升就推不出去」的坑；
+/// - 其余包（对外发布、用户可能手动安装/升级的 npm 包，如 dsh-webui-plus）：
+///   **版本感知**——磁盘版本 ≥ 内置版本则整体跳过（尊重用户手动安装/升级，
+///   升级鲸仔不降级覆盖用户内容）；仅当磁盘版本更低或未安装时才写入内置版本。
+///
+/// R5：目标目录是**符号链接**（pnpm 依赖树的标准形态，`dsh plugin add` 装的
+/// 包都指向 .pnpm store）→ 整体跳过。绝不顺着符号链接写进 pnpm store 篡改
+/// 依赖树；pnpm 管理的包由 dsh/pnpm 负责，鲸仔不碰。
 pub fn sync_package_files(profile: &Path) -> Result<bool, String> {
     let mut changed = false;
     for pkg in PKGS {
         let pkg_dir = profile.join("node_modules").join(pkg.name);
-        // 内置 package.json 即 files 中的第一项；磁盘版本与之比较。
-        let builtin_json = pkg
-            .files
-            .iter()
-            .find(|(n, _)| *n == "package.json")
-            .map(|(_, c)| *c);
-        let disk_pkg_path = pkg_dir.join("package.json");
-        let disk_json = fs::read_to_string(&disk_pkg_path).ok();
-        let builtin_ver = builtin_json.and_then(pkg_version);
-        let disk_ver = disk_json.as_deref().and_then(pkg_version);
-        if let (Some(b), Some(d)) = (builtin_ver, disk_ver) {
-            if d >= b {
-                // 用户安装的版本不低于内置：不覆盖，避免"已安装的插件被还原"。
+        // pnpm 依赖树符号链接：用户通过 dsh plugin 安装的包，跳过（不写不覆盖）。
+        if let Ok(meta) = fs::symlink_metadata(&pkg_dir) {
+            if meta.file_type().is_symlink() {
                 continue;
+            }
+        }
+        if !pkg.force_sync {
+            // 版本感知（仅对可手动安装的公开包）：磁盘版本 ≥ 内置 → 跳过。
+            let builtin_json = pkg
+                .files
+                .iter()
+                .find(|(n, _)| *n == "package.json")
+                .map(|(_, c)| *c);
+            let disk_pkg_path = pkg_dir.join("package.json");
+            let disk_json = fs::read_to_string(&disk_pkg_path).ok();
+            let builtin_ver = builtin_json.and_then(pkg_version);
+            let disk_ver = disk_json.as_deref().and_then(pkg_version);
+            if let (Some(b), Some(d)) = (builtin_ver, disk_ver) {
+                if d >= b {
+                    // 用户安装的版本不低于内置：不覆盖，避免"已安装的插件被还原"。
+                    continue;
+                }
             }
         }
         for (name, content) in pkg.files {
@@ -441,16 +589,20 @@ pub fn sync_package_files(profile: &Path) -> Result<bool, String> {
 
 /// 维护 cordis.patch.yml 标记块；返回是否有写入。
 /// 显式以 UTF-8 编码写入，杜绝旧版把 `⟪` 写成 `隡` 的编码损坏。
+/// 禁用状态从现有文件解析后重建标记块（幂等）；R1：bundle 层已有 PKGS 同名
+/// 包（用户 dsh plugin 安装）→ 标记块跳过该插件的 insert 行，避免双重加载。
 pub fn sync_patch_layer(profile: &Path) -> Result<bool, String> {
     let path = profile.join("cordis.patch.yml");
+    let bundles = active_bundles(profile);
     let current = if path.exists() {
         fs::read_to_string(&path).map_err(|e| format!("读取 cordis.patch.yml 失败：{e}"))?
     } else {
         // 文件不存在：直接写标记块（不要先写 `[]` 再追加，避免中间态语法错误）。
-        fs::write(&path, managed_block()).map_err(|e| format!("写入 cordis.patch.yml 失败：{e}"))?;
+        let block = managed_block(&[], &bundles);
+        fs::write(&path, block).map_err(|e| format!("写入 cordis.patch.yml 失败：{e}"))?;
         return Ok(true);
     };
-    let updated = upsert_marker_block(&current);
+    let updated = upsert_marker_block_with(&current, &bundles, &[]);
     if updated == current {
         return Ok(false);
     }
@@ -503,6 +655,107 @@ pub fn sync_settings_plugin(app: AppHandle) -> Result<PluginSyncReport, String> 
     ensure_settings_plugin(&app)
 }
 
+/// 内置插件状态行（设置分区「内置插件」tab 的数据源）。
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginEntryView {
+    /// loader 条目 id（patch 覆盖行按它定向）。
+    pub id: String,
+    /// npm 包名。
+    pub name: String,
+    /// 一句话描述。
+    pub description: String,
+    /// 鲸仔自身组件（whalito-settings）：不提供禁用。
+    pub builtin: bool,
+    /// 未安装时可由鲸仔安装（dshmarket 被用户卸载后的恢复入口）。
+    pub installable: bool,
+    /// 是否已安装（node_modules 有包 = 已就绪；dshmarket 看 bundle 层）。
+    pub installed: bool,
+    /// 当前是否被禁用（patch 标记块内的 disabled 覆盖行）。
+    pub disabled: bool,
+}
+
+/// 内置插件列表 + 当前状态（供「鲸仔设置」分区与面板展示）。
+#[tauri::command]
+pub fn plugins_status(_app: AppHandle) -> Vec<PluginEntryView> {
+    let profile = profile_dir();
+    let patch = fs::read_to_string(profile.join("cordis.patch.yml")).unwrap_or_default();
+    let disabled = parse_disabled_ids(&patch);
+    let bundles = installed_bundles(&profile);
+    let is_disabled = |id: &str| disabled.iter().any(|d| d == id);
+    let mut out: Vec<PluginEntryView> = Vec::new();
+    for pkg in PKGS {
+        let builtin = pkg.id == "whalito-settings";
+        out.push(PluginEntryView {
+            id: pkg.id.to_string(),
+            name: pkg.name.to_string(),
+            description: match pkg.id {
+                "whalito-settings" => "鲸仔设置分区：内嵌页里鲸仔配置、服务器控制与版本信息的入口。".to_string(),
+                _ => "WebUI+ 增强：DSH 网页界面的实用增强（版本徽标、推荐卡片等）。".to_string(),
+            },
+            builtin,
+            installable: false,
+            installed: true,
+            disabled: !builtin && is_disabled(pkg.id),
+        });
+    }
+    // dshmarket：bundle 层插件（鲸仔预装，用户可卸载；未装时提供安装入口）。
+    let market_installed = bundles.iter().any(|b| b == crate::market::MARKET_PKG);
+    out.push(PluginEntryView {
+        id: "dsh-market".to_string(),
+        name: crate::market::MARKET_PKG.to_string(),
+        description: "插件市场：在 DSH 设置页内浏览、搜索并安装社区插件（含热挂载与自重启）。".to_string(),
+        builtin: false,
+        installable: true,
+        installed: market_installed,
+        disabled: is_disabled("dsh-market"),
+    });
+    out
+}
+
+/// 切换内置插件禁用状态（写 cordis.patch.yml 标记块内的 disabled 覆盖行）。
+/// 只允许 DISABLEABLE_IDS；**禁用 ≠ 卸载**——不删除任何插件文件，
+/// 重新启用即恢复加载（bundle 层插件保持已安装）。改动需重启 DSH 生效。
+/// 返回新的状态列表。
+#[tauri::command]
+pub fn toggle_plugin(app: AppHandle, id: String, enabled: bool) -> Result<Vec<PluginEntryView>, String> {
+    if !DISABLEABLE_IDS.contains(&id.as_str()) {
+        return Err(format!("插件 {id} 不允许禁用（内置组件或未知插件）"));
+    }
+    let profile = profile_dir();
+    let path = profile.join("cordis.patch.yml");
+    let current = if path.exists() {
+        fs::read_to_string(&path).map_err(|e| format!("读取 cordis.patch.yml 失败：{e}"))?
+    } else {
+        String::new()
+    };
+    let bundles = active_bundles(&profile);
+    let mut disabled = parse_disabled_ids(&current);
+    if enabled {
+        disabled.retain(|d| d != &id);
+    } else if !disabled.contains(&id) {
+        disabled.push(id.clone());
+    }
+    // 用权威禁用列表重建标记块（不走 upsert 的重新解析，保证启用后旧行被移除）。
+    let block = managed_block(
+        &disabled.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+        &bundles,
+    );
+    let updated = replace_marker_block(&current, &block);
+    if updated != current {
+        fs::write(&path, updated).map_err(|e| format!("写入 cordis.patch.yml 失败：{e}"))?;
+    }
+    let st = app.state::<AppState>();
+    crate::state::push_log(
+        &st.logs,
+        &format!(
+            "[系统] 已{}内置插件 {id}（重启服务器后生效）",
+            if enabled { "启用" } else { "禁用" }
+        ),
+    );
+    Ok(plugins_status(app))
+}
+
 /// 诊断辅助：把鲸仔桥事件追加写入 %TEMP%\whalito-bridge.log，
 /// 供排障时直接查看（内嵌页 postMessage 链路两侧的行为都落到这里）。
 #[tauri::command]
@@ -542,6 +795,138 @@ mod tests {
         // 每个包都有对应 id 行（name 去掉 scope 前缀）。
         assert!(out.contains("id: whalito-settings"));
         assert!(out.contains("id: dsh-webui-plus"));
+    }
+
+    #[test]
+    fn managed_block_emits_disabled_overrides() {
+        // 禁用 webui-plus（PKGS）：insert 行保留 + disabled 覆盖行——
+        // patch 顶层条目只能覆盖「已存在」的行，没有 insert 覆盖会落空。
+        let block = managed_block(&["dsh-webui-plus"], &[]);
+        assert!(block.contains("- id: dsh-webui-plus\n  disabled: true"));
+        assert!(block.contains("name: '@entireyu/dsh-webui-plus'"), "禁用时必须保留 insert 行：{block}");
+        // whalito-settings 不受影响（不可禁用，仍 insert）。
+        assert!(block.contains("id: whalito-settings"));
+        assert!(block.contains("name: '@entireyu/whalito-dsh-settings'"));
+        // dshmarket（不在 PKGS，bundle 层行由包自身 insert）→ 只需覆盖行。
+        let block2 = managed_block(&["dsh-market"], &[]);
+        assert!(block2.contains("- id: dsh-market\n  disabled: true"));
+        assert!(block2.contains("name: '@entireyu/dsh-webui-plus'"));
+    }
+
+    #[test]
+    fn managed_block_skips_bundles_managed_pkgs() {
+        // R1：bundle 层「真正激活」的同名包（active_bundles 由调用方算出）→ 跳过 insert。
+        let active = vec!["@entireyu/dsh-webui-plus".to_string()];
+        let block = managed_block(&[], &active);
+        assert!(!block.contains("name: '@entireyu/dsh-webui-plus'"));
+        assert!(block.contains("name: '@entireyu/whalito-dsh-settings'"));
+        // 未激活 → 照常 insert（普通依赖不算，否则 WebUI+ 会凭空消失）。
+        let block2 = managed_block(&[], &[]);
+        assert!(block2.contains("name: '@entireyu/dsh-webui-plus'"));
+    }
+
+    #[test]
+    fn bundle_layer_active_requires_dsh_bundle_manifest() {
+        // bundle_layer_active：bundles 列出 + 包声明 dsh.bundle 才算激活。
+        let base = std::env::temp_dir().join(format!("whalito-bla-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let profile = base.join("profiles").join("web");
+        // 无 dsh 声明 → 普通依赖，不激活。
+        let plain = profile.join("node_modules").join("plain-pkg");
+        fs::create_dir_all(&plain).unwrap();
+        fs::write(plain.join("package.json"), r#"{"name":"plain-pkg","version":"1.0.0"}"#).unwrap();
+        assert!(!bundle_layer_active(&profile, "plain-pkg"));
+        // 只有 dsh.client → 不激活（dsh.client 单独不可安装）。
+        let client_only = profile.join("node_modules").join("client-pkg");
+        fs::create_dir_all(&client_only).unwrap();
+        fs::write(
+            client_only.join("package.json"),
+            r#"{"name":"client-pkg","dsh":{"client":{"platform":"web"}}}"#,
+        )
+        .unwrap();
+        assert!(!bundle_layer_active(&profile, "client-pkg"));
+        // 声明 dsh.bundle → 激活。
+        let bundle = profile.join("node_modules").join("bundle-pkg");
+        fs::create_dir_all(&bundle).unwrap();
+        fs::write(
+            bundle.join("package.json"),
+            r#"{"name":"bundle-pkg","dsh":{"bundle":{"patch":"./cordis.patch.yml"}}}"#,
+        )
+        .unwrap();
+        assert!(bundle_layer_active(&profile, "bundle-pkg"));
+        // 文件缺失 → false。
+        assert!(!bundle_layer_active(&profile, "missing-pkg"));
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn parse_disabled_ids_finds_top_level_entries_only() {
+        // 顶格 `- id:` + disabled: true 才是禁用条目；insert 块的缩进 id 不算。
+        let patch = format!(
+            "{MARK_BEGIN}\n\
+             - insert:\n    - id: dsh-webui-plus\n      name: 'x'\n\
+             - id: dsh-market\n  disabled: true\n\
+             {MARK_END}\n\
+             - insert:\n    - id: dsh-market\n      name: 'y'\n"
+        );
+        let ids = parse_disabled_ids(&patch);
+        assert_eq!(ids, vec!["dsh-market".to_string()]);
+        // 无禁用内容 → 空。
+        assert!(parse_disabled_ids("# 注释\n[]\n").is_empty());
+    }
+
+    #[test]
+    fn disabled_state_survives_sync_and_toggle_roundtrip() {
+        // 禁用 dshmarket → 标记块含覆盖行；再次 upsert（模拟下次同步）幂等。
+        let base = "# 用户注释\n[]\n";
+        let once = upsert_marker_block_with(base, &[], &["dsh-market".to_string()]);
+        assert!(once.contains("- id: dsh-market\n  disabled: true"));
+        let twice = upsert_marker_block_with(&once, &[], &[]);
+        assert_eq!(once, twice);
+        // 启用：权威列表重建（replace 路径）→ 覆盖行被移除、insert 恢复。
+        let disabled: Vec<String> = Vec::new();
+        let block = managed_block(&[], &[]);
+        let reenabled = replace_marker_block(&once, &block);
+        assert!(!reenabled.contains("- id: dsh-market"));
+        assert!(reenabled.contains("name: '@entireyu/dsh-webui-plus'"));
+        // 用户注释保留。
+        assert!(reenabled.starts_with("# 用户注释\n"));
+    }
+
+    #[test]
+    fn sync_package_files_skips_symlinked_dirs() {
+        // R5：pnpm 依赖树是符号链接，鲸仔绝不写穿它（此测试仅在可建符号链接的平台）。
+        #[cfg(not(windows))]
+        {
+            let base =
+                std::env::temp_dir().join(format!("whalito-symlink-test-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&base);
+            let profile = base.join("profiles").join("web");
+            let pkg_dir = profile.join("node_modules").join(PKGS[1].name);
+            fs::create_dir_all(pkg_dir.parent().unwrap()).unwrap();
+            let target = base.join("store").join("real-pkg");
+            fs::create_dir_all(&target).unwrap();
+            fs::write(target.join("package.json"), r#"{"name":"x","version":"9.9.9"}"#).unwrap();
+            std::os::unix::fs::symlink(&target, &pkg_dir).unwrap();
+            // 符号链接存在：同步必须整体跳过，不写任何文件。
+            assert!(!sync_package_files(&profile).unwrap());
+            assert_eq!(
+                fs::read_to_string(target.join("package.json")).unwrap(),
+                r#"{"name":"x","version":"9.9.9"}"#,
+                "不得顺着符号链接写入 store"
+            );
+            let _ = fs::remove_dir_all(&base);
+        }
+        // Windows：不建符号链接（权限），仅验证普通目录路径仍正常。
+        #[cfg(windows)]
+        {
+            let base = std::env::temp_dir()
+                .join(format!("whalito-symlink-test-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&base);
+            let profile = base.join("profiles").join("web");
+            assert!(sync_package_files(&profile).unwrap());
+            let _ = fs::remove_dir_all(&base);
+        }
     }
 
     #[test]
@@ -618,6 +1003,30 @@ mod tests {
                 assert_eq!(fs::read_to_string(&path).unwrap(), *content);
             }
         }
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn force_sync_pkg_overrides_same_version_content() {
+        // 防再犯（0.5.0 踩过的坑）：whalito-settings 内容变更但版本号没升
+        // （磁盘版本 == 内置版本）→ force_sync 必须仍按内容覆盖推送。
+        let base = std::env::temp_dir().join(format!("whalito-fsync-test-{}", std::process::id()));
+        let profile = base.join("profiles").join("web");
+        let _ = fs::remove_dir_all(&base);
+        let pkg_dir = profile.join("node_modules").join(PKGS[0].name);
+        fs::create_dir_all(&pkg_dir).unwrap();
+        // 磁盘 package.json 与内置同版本（0.2.2），但 client.js 是旧内容。
+        let same_ver = r#"{"name":"@entireyu/whalito-dsh-settings","version":"0.2.2"}"#;
+        fs::write(pkg_dir.join("package.json"), same_ver).unwrap();
+        fs::write(pkg_dir.join("client.js"), "// 旧内容\n").unwrap();
+        assert!(sync_package_files(&profile).unwrap());
+        let written = fs::read_to_string(pkg_dir.join("client.js")).unwrap();
+        assert!(
+            !written.contains("// 旧内容"),
+            "force_sync 包内容不同必须覆盖：{written}"
+        );
+        // 幂等：内容相同后不再写。
+        assert!(!sync_package_files(&profile).unwrap());
         let _ = fs::remove_dir_all(&base);
     }
 

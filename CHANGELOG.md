@@ -4,6 +4,29 @@
 
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.5.0] - 2026-08-26
+
+### 新增
+- 「鲸仔设置」分区界面重构为三 tab：**设置 / 内置插件 / 版本信息**，顶部主标题 + 描述（与其他 DSH 设置页一致），页脚居中 logo + 「鲸仔Whalito / 你的DeepSeek Harness桌面搭子」；tab 与卡片沿用 DSH 主题变量（`--dsw-alias-*`），明暗自适应
+  - 设置 tab：服务信息卡片（状态颜色徽标 + WebUI 地址一行展示 + 服务器操作按钮）、DeepSeek Harness 服务设置（端口、服务器异常退出后自动重启）、其他设置（**下载节点**——原「npm 镜像源」改名，描述「影响 DSH 与插件的下载节点，DSH 来源不变」，提供全球节点/中国大陆节点快捷切换、下载目录、开机自启、显示桌宠）；工作目录项从设置页移除（字段保留、行为不变）
+  - 内置插件 tab：社区风险声明 + 插件列表（`whalito-settings` 显示内置不可禁用；`dsh-webui-plus` / `dsh-market` 可开关）。**插件开关**：禁用 = 在 `cordis.patch.yml` 标记块写入 `- id: xxx` + `disabled: true` 覆盖行（loader 原生 disabled 语义），**不卸载、不删除插件文件**，重新启用即恢复；开关后提示「重启服务器生效」+ 立即重启按钮；dsh-market 卸载后显示「安装」按钮（复用重装流程）
+  - 版本信息 tab：原版本块（DSH 版本偏好、DSH/鲸仔版本行、检查更新、GitHub）原样迁入
+- 集成社区插件市场 **dsh-market**（npm 包 `dshmarket`）：鲸仔启动时（应用启动与服务器启动前，幂等）检查 web profile 的 `dsh.profile.bundles`，缺失且用户未主动卸载过则自动执行 `dsh plugin --profile web add dshmarket`——DSH 首次启动即带「插件市场」，设置页内即可浏览/搜索/安装/更新/卸载社区插件（1400+，含热挂载：纯 insert 的插件安装后立即生效，无需重启）
+- 插件自重启接管：dsh-market 热挂载失败时会「自重启」（detached helper 以相同启动命令拉起新进程再杀掉旧进程）。鲸仔作为 DSH 进程的外部管理者，在旧进程退出、端口仍存活时按端口定位新进程自动接管（注入 `WHALITO_MANAGED` / `WHALITO_PORT` 环境变量标识托管链），面板/托盘/停止/自动重启状态保持连贯，不再误报「服务器已停止」；接管成功提示「DSH 已自行重启（插件市场等触发），已重新接管」，内嵌页自动重载
+- 管理后台新增「插件市场」状态行：显示已就绪 / 已卸载（不自动装回）/ 未安装，可手动「检查 / 安装」；用户主动卸载 dshmarket 后鲸仔不再自动装回（`installedOnce` 标记），需要时点「重新安装」即可
+- 新增「dsh 命令注册到系统 PATH」（设置 tab → 其他设置）：一键注册/注销，让终端直接使用 `dsh` 命令——支持**用户级 / 系统级**两级：用户级 Windows 写 `HKCU\Environment\Path`（保持 REG_EXPAND_SZ）并广播环境变更、macOS 维护 `~/.zshrc` 标记块（免管理员）；系统级 Windows 写 `HKLM\...\Session Manager\Environment`、macOS 写 `/etc/paths.d/whalito`（需管理员/sudo，失败给出明确提示）。注册后需新开终端生效，注销随时可逆；不影响鲸仔自身运行（鲸仔从不依赖 PATH 定位 dsh）
+- 「鲸仔设置」设置 tab 布局疏朗化：分组间距加大（小标题上方 28px、字段间 16px、服务信息卡片内边距 14/16 与行距 12px），设置项不再密集堆叠
+
+### 修复
+- 修复 DSH 被插件（市场等）自重启后鲸仔状态错乱：旧 pid 退出即报「服务器已停止」、托盘复位、停止/自动重启按失效 pid 操作——现按端口定位新进程接管（最长 10 秒探测窗口，覆盖 helper 拉起新进程的延迟；用户主动停止优先让位）
+- 修复测试版鲸仔安装/更新 DSH 会破坏生产环境：此前测试版与生产版共用 `%LOCALAPPDATA%\dsh-launcher\npm` 前缀，测试版重装 DSH 会把生产 DSH 的包目录 rename 走并覆盖成测试版版本，导致运行中的生产 DSH 崩溃、版本错乱——测试构建现使用独立前缀（`dsh-launcher-test`），安装/更新/备份/插件市场操作与生产完全隔离
+- 修复安装测试版安装包会误杀生产鲸仔：测试包的可执行文件名与生产同为 `Whalito.exe`（tauri `mainBinaryName` 默认取 Cargo bin 名，productName 只影响目录名），NSIS 安装器按 exe 名检测运行进程时把生产鲸仔当作「正在运行」并终止——测试构建现显式配置 `mainBinaryName: Whalito-Test`，安装/卸载只识别测试版自身进程
+- 修复内置插件（whalito-settings）内容更新不生效：托管插件同步对**鲸仔独占托管**（private、不可手动安装）的包改为**内容比对覆盖**（`force_sync`），不再依赖 package.json 版本号——避免「改了内嵌内容但忘了升版本」时，版本感知（磁盘 ≥ 内置则跳过）导致改动永远推不出去的坑；对外可安装的包（如 dsh-webui-plus）仍保持版本感知（防降级覆盖用户手动版本）
+- 修复插件开关禁用 webui-plus 失效：cordis patch 顶层 `- id:` 条目只能覆盖**已存在**的行——禁用托管插件时**保留 insert 行 + 追加 disabled 覆盖行**（insert 创建行、覆盖行禁用），否则匹配不到行禁用无效
+- 修复 R1 误伤：bundle 层已有同名包时跳过标记块 insert 的判定**要求该包声明 `dsh.bundle`**（普通依赖、仅 `dsh.client` 的包不会在 bundle 层激活，不能据此跳过，否则 WebUI+ 凭空消失）
+- 修复「禁用 → 卸载 → 再安装」后重启仍禁用：dshmarket 卸载后残留的 patch disabled 覆盖行，安装成功时自动清理（用户意图）
+- 修复 tab 高亮「亮了不灭」：React 对 `borderBottom`（shorthand）+ `borderBottomColor`（longhand）混用时切走可能不清色——改为单一 `borderBottom` shorthand（含颜色）整体替换
+
 ## [0.4.8] - 2026-08-26
 
 ### 修复

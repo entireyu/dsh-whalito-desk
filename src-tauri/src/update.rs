@@ -362,6 +362,38 @@ async fn confirm_update(app: &AppHandle) -> Result<bool, String> {
     .map_err(|e| format!("显示更新确认对话框失败：{e}"))
 }
 
+/// 鲸仔更新确认对话框的独立命令：前端在**打开全屏 loading 之前**先调用它，
+/// 用户确认后才进入更新流程（避免「确认框还没点，loading 已经盖上」）。
+/// 确认后前端应以 `whalito_apply_update(skipConfirm=true)` 执行，跳过二次确认。
+#[tauri::command]
+pub async fn confirm_whalito_update(app: AppHandle) -> Result<bool, String> {
+    confirm_update(&app).await
+}
+
+/// DSH 升级前的备份确认对话框（设置分区「立即更新」入口调用）。
+/// 鲸仔会自动备份 DSH 配置与插件（backup_dsh_config），这里再让用户确认一次
+/// 重要数据已自行备份（双保险），确认后才开始升级；取消返回 Ok(false)。
+#[tauri::command]
+pub async fn confirm_dsh_update(app: AppHandle) -> Result<bool, String> {
+    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
+    let handle = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        handle
+            .dialog()
+            .message(
+                "升级 DeepSeek Harness 前，请先备份插件信息。\n\n鲸仔会自动备份 DSH 配置与插件（备份路径见运行日志），建议您也确认重要数据已自行备份。\n\n确认已备份并继续升级？",
+            )
+            .title("升级前备份确认")
+            .buttons(MessageDialogButtons::OkCancelCustom(
+                "确认已备份，开始升级".to_string(),
+                "取消".to_string(),
+            ))
+            .blocking_show()
+    })
+    .await
+    .map_err(|e| format!("显示备份确认对话框失败：{e}"))
+}
+
 /// 选择当前平台 + 变体适用的安装包资产：
 /// Windows 匹配 `_x64-setup.exe`，macOS 匹配 `.dmg`；
 /// 测试构建只接受名称含 "-Test_" 的资产，生产构建只接受不含 "-Test_" 的资产。

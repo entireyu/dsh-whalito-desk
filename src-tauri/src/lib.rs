@@ -1,4 +1,6 @@
 mod commands;
+mod dshpath;
+mod market;
 mod pet;
 mod pet_style;
 mod settings_plugin;
@@ -141,12 +143,20 @@ pub fn run() {
             commands::clipboard_read,
             settings_plugin::sync_settings_plugin,
             settings_plugin::bridge_diag,
+            settings_plugin::plugins_status,
+            settings_plugin::toggle_plugin,
+            market::sync_market_plugin,
+            market::market_status,
+            dshpath::dsh_path_status,
+            dshpath::dsh_path_toggle,
             pet::show_main_window,
             pet::quit_app,
             update::whalito_version_info,
             update::whalito_check_update,
             update::whalito_apply_update,
             update::whalito_update_result,
+            update::confirm_dsh_update,
+            update::confirm_whalito_update,
             update::snooze_update,
             pet::pet_status,
             pet::pet_open_session,
@@ -169,6 +179,13 @@ pub fn run() {
 
             // 幂等同步鲸仔设置分区插件到 web profile（启动服务器前还会再同步一次）。
             let _ = crate::settings_plugin::ensure_settings_plugin(&handle);
+            // 幂等准备插件市场（dsh-market）：首次启动前装好，DSH 设置页即见
+            // 「插件市场」；失败只记日志（best-effort），不阻断应用启动。
+            {
+                let st = app.state::<AppState>();
+                let shared = commands::Shared::from_state(&st);
+                let _ = crate::market::ensure_market_plugin(&handle, &shared);
+            }
 
             // 测试构建：窗口标题加标记，便于区分两个共存实例。
             if crate::state::TEST_BUILD {

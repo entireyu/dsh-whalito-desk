@@ -660,13 +660,23 @@ pub fn dsh_bin(npm_prefix: &str) -> Option<PathBuf> {
 }
 
 /// 应用专用 npm 安装前缀（用户目录内，隔离且免管理员权限）。
+/// **测试构建使用独立前缀**：此前测试版与生产版共用 `dsh-launcher/npm`，
+/// 测试版安装/更新 DSH 时会把生产 DSH 的包目录 rename 走并重装（不同版本），
+/// 导致运行中的生产 DSH 文件丢失崩溃、版本错乱——这是「测试版动生产」的根因。
+/// 现在测试版 DSH 装在独立前缀，安装/更新/备份/市场操作全部隔离。
 pub fn app_prefix_dir() -> PathBuf {
+    app_prefix_dir_at(TEST_BUILD)
+}
+
+fn app_prefix_dir_at(test_build: bool) -> PathBuf {
     #[cfg(windows)]
     {
         let base = std::env::var("LOCALAPPDATA")
             .or_else(|_| std::env::var("USERPROFILE"))
             .unwrap_or_else(|_| ".".to_string());
-        Path::new(&base).join("dsh-launcher").join("npm")
+        Path::new(&base)
+            .join(if test_build { "dsh-launcher-test" } else { "dsh-launcher" })
+            .join("npm")
     }
     #[cfg(target_os = "macos")]
     {
@@ -674,13 +684,25 @@ pub fn app_prefix_dir() -> PathBuf {
         Path::new(&home)
             .join("Library")
             .join("Application Support")
-            .join("com.deepseek.dsh-launcher")
+            .join(if test_build {
+                "com.deepseek.dsh-launcher.test"
+            } else {
+                "com.deepseek.dsh-launcher"
+            })
             .join("npm")
     }
     #[cfg(all(not(windows), not(target_os = "macos")))]
     {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        Path::new(&home).join(".local").join("share").join("dsh-launcher").join("npm")
+        Path::new(&home)
+            .join(".local")
+            .join("share")
+            .join(if test_build {
+                "dsh-launcher-test"
+            } else {
+                "dsh-launcher"
+            })
+            .join("npm")
     }
 }
 
@@ -1200,6 +1222,19 @@ mod tests {
         assert_eq!(parse_semver("22.19"), Some((22, 19, 0)));
         assert_eq!(parse_semver("abc"), None);
         assert_eq!(parse_semver(""), None);
+    }
+
+    #[test]
+    fn app_prefix_isolated_for_test_build() {
+        // 测试构建必须使用独立 DSH 安装前缀：共用前缀时测试版安装/更新 DSH
+        // 会 rename 并重装生产 DSH 的文件（运行中的生产 DSH 崩溃、版本错乱）。
+        let prod = app_prefix_dir_at(false);
+        let test = app_prefix_dir_at(true);
+        assert_ne!(prod, test, "测试前缀必须与生产前缀不同");
+        let prod_s = prod.to_string_lossy().to_lowercase();
+        let test_s = test.to_string_lossy().to_lowercase();
+        assert!(!prod_s.contains("test"), "生产前缀不应含 test 标识：{prod_s}");
+        assert!(test_s.contains("test"), "测试前缀应含 test 标识：{test_s}");
     }
 
     #[test]

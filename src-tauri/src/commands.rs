@@ -35,11 +35,11 @@ impl Shared {
         }
     }
 
-    fn node_dir(&self) -> Option<String> {
+    pub fn node_dir(&self) -> Option<String> {
         self.settings.lock().unwrap().node_dir.clone()
     }
 
-    fn registry(&self) -> String {
+    pub fn registry(&self) -> String {
         self.settings.lock().unwrap().registry.trim().to_string()
     }
 
@@ -838,6 +838,9 @@ pub fn start_server_impl(app: &AppHandle, shared: &Shared) -> Result<ServerStatu
 
     // 启动前强制同步鲸仔设置分区插件（幂等），保证 Loader 能解析插件条目。
     crate::settings_plugin::ensure_settings_plugin(app)?;
+    // 首次准备插件市场（dsh-market）：bundles 缺 dshmarket 且用户未主动卸载过
+    // 才执行安装；失败只记日志（best-effort），不阻断服务器启动。
+    let _ = crate::market::ensure_market_plugin(app, shared);
 
     shared.stop.store(false, Ordering::SeqCst);
     *shared.url.lock().unwrap() = None;
@@ -845,6 +848,11 @@ pub fn start_server_impl(app: &AppHandle, shared: &Shared) -> Result<ServerStatu
     let mut cmd = std::process::Command::new(&node);
     // DSH 家目录与插件同步保持一致（测试构建使用隔离的 ~/.dsh-test）。
     cmd.env("DSH_HOME", crate::settings_plugin::dsh_home());
+    // 鲸仔托管标记：dsh-market 等插件热挂载失败时会「自重启」（detached helper
+    // 用相同启动命令拉起新进程再杀掉旧进程，env 原样继承）。旧 pid 退出后鲸仔
+    // 按端口定位新进程接管（见 market::takeover_pid），避免误报「服务器已停止」。
+    cmd.env("WHALITO_MANAGED", "1");
+    cmd.env("WHALITO_PORT", port.to_string());
     // macOS GUI 进程 PATH 极简：注入用户 shell 的 PATH，保证 dsh 的技能 /
     // 子进程能找到 git 等常用工具；其他平台保持默认继承。
     if let Some(p) = state::effective_path() {
@@ -938,6 +946,44 @@ pub fn start_server_impl(app: &AppHandle, shared: &Shared) -> Result<ServerStatu
         }
         drop(p);
         if is_current {
+            // 自重启接管：非用户停止且端口仍有服务 → 定位新进程接管（dsh-market
+            // 等插件触发 DSH 自重启的场景）。detached helper 在旧进程退出、端口
+            // 释放后才拉起新进程，从退出到可服务通常 1~3 秒，这里按固定窗口重试。
+            if !was_stopped {
+                let mut new_pid: Option<u32> = None;
+                for _ in 0..crate::market::TAKEOVER_RETRIES {
+                    if stop.load(Ordering::SeqCst) {
+                        break; // 用户在此期间要求停止 → 让位正常退出路径
+                    }
+                    if let Some(hit) = crate::market::takeover_pid(port, false) {
+                        new_pid = Some(hit);
+                        break;
+                    }
+                    std::thread::sleep(crate::market::TAKEOVER_RETRY_INTERVAL);
+                }
+                if let Some(new_pid) = new_pid {
+                    if !stop.load(Ordering::SeqCst) {
+                        let mut slot = pid_slot.lock().unwrap();
+                        if *slot == None {
+                            *slot = Some(new_pid);
+                        }
+                        drop(slot);
+                        if *pid_slot.lock().unwrap() == Some(new_pid) {
+                            state::refresh_tray(&app2, true);
+                            state::push_log(
+                                &logs,
+                                &format!(
+                                    "[系统] 检测到 DSH 已自行重启（插件市场等触发），已重新接管（新 pid {new_pid}）"
+                                ),
+                            );
+                            // url 保留（同端口），不发 server-exited；前端收到后
+                            // 提示并重载内嵌页。
+                            let _ = app2.emit("server-restarted", new_pid);
+                            return;
+                        }
+                    }
+                }
+            }
             *url_slot.lock().unwrap() = None;
             if !was_stopped {
                 let code = result.as_ref().ok().and_then(|s| s.code()).unwrap_or(-1);

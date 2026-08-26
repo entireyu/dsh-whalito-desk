@@ -455,10 +455,10 @@
         error: '异常',
       };
 
-      // npm 镜像源快捷切换预设。
+      // 下载节点快捷切换预设（原 npm 镜像源；命名面向网络状况而非 npm）。
       var REGISTRY_PRESETS = [
-        { key: 'npm', label: 'npm 官方源', url: 'https://registry.npmjs.org' },
-        { key: 'npmmirror', label: 'npmmirror（国内加速）', url: 'https://registry.npmmirror.com' },
+        { key: 'npm', label: '全球节点', url: 'https://registry.npmjs.org' },
+        { key: 'npmmirror', label: '中国大陆节点', url: 'https://registry.npmmirror.com' },
       ];
       // DSH 版本偏好预设：对应 npm 发布标签，检查更新与更新安装都按所选标签查询。
       var CHANNEL_PRESETS = [
@@ -483,16 +483,11 @@
       // 鲸仔应用 logo（64x64 PNG 的 data URI，由打包时注入；展示 32px 即 2x 密度）。
       var APP_ICON_SRC = 'data:image/png;base64,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';
 
+      // 顶部：主标题 + 描述（与其他 DSH 设置页保持一致；logo 移到页脚）。
       function headerBlock() {
-        return h('div', { key: 'whalito-head', style: { display: 'flex', alignItems: 'center', gap: '10px' } }, [
-          h('img', {
-            key: 'app-icon',
-            src: APP_ICON_SRC,
-            width: 32, height: 32,
-            style: { borderRadius: '8px', display: 'block' },
-            alt: '鲸仔',
-          }),
-          h('span', { key: 'whalito-sub', style: styles.hint }, '鲸仔（Whalito）桌面端设置'),
+        return h('div', { key: 'whalito-head', style: { display: 'flex', flexDirection: 'column', gap: '2px', marginBottom: '2px' } }, [
+          h('span', { key: 'whalito-title', style: { fontSize: '15px', fontWeight: 600, lineHeight: 1.4 } }, '鲸仔Whalito桌面端设置'),
+          h('span', { key: 'whalito-desc', style: styles.hint }, '鲸仔Whalito是在开源社区维护的桌面端程序，此页面管理桌面端的相关配置'),
         ]);
       }
 
@@ -512,6 +507,13 @@
         var checking = React.useState('');
         var updating = React.useState('');
         var updateStage = React.useState('');
+        // 0.5.0：三 tab（设置 / 内置插件 / 版本信息）+ 内置插件列表 + 重启提示。
+        var tab = React.useState('settings');
+        var plugins = React.useState(null);
+        var restartHint = React.useState(false);
+        // dsh 命令 PATH 注册状态（hello 快照 / dsh-path 下行消息）+ 当前查看级别。
+        var dshPaths = React.useState(null);
+        var dshLevel = React.useState('user');
         // 消息监听器挂在只跑一次的 useEffect 里，闭包会捕获挂载时的 state 数组
         // （值恒为初始值）；用 ref 在每次渲染时刷新最新快照供监听器读取。
         var draftRef = React.useRef(null);
@@ -536,6 +538,8 @@
               }
               if (data.status) status[1](data.status);
               if (data.versions) versions[1](data.versions);
+              if (data.plugins) plugins[1](data.plugins);
+              if (data.dshPaths) dshPaths[1](data.dshPaths);
               connected[1](true);
               checking[1]('');
               updating[1]('');
@@ -548,6 +552,21 @@
               if (data.versions) versions[1](data.versions);
               checking[1]('');
               updating[1]('');
+            } else if (data.type === 'plugins') {
+              // 开关切换后的最新列表（hello 快照也会带）。
+              if (data.plugins) plugins[1](data.plugins);
+              restartHint[1](true);
+            } else if (data.type === 'dsh-path') {
+              // PATH 注册/注销后的最新状态（单级别视图，合并进两级快照）。
+              if (data.dshPath) {
+                var prev = dshPaths[0] || {};
+                var next = Object.assign({}, prev);
+                next[data.dshPath.level || 'user'] = data.dshPath;
+                dshPaths[1](next);
+              }
+            } else if (data.type === 'notice') {
+              // 安装等操作的完成提示。
+              if (typeof data.message === 'string' && data.message) notice[1](data.message);
             } else if (data.type === 'picked-dir') {
               // 原生目录选择结果：写入草稿并标记脏（即使此前已编辑过）。
               if (typeof data.path === 'string' && data.field === 'workspaceDir') {
@@ -727,9 +746,9 @@
           var vw = v && v.whalito ? v.whalito : null;
           return h('div', {
             key: 'versions',
-            style: { display: 'flex', flexDirection: 'column', gap: '8px', borderTop: '1px solid rgba(127,127,127,.25)', paddingTop: '12px' },
+            // 已在「版本信息」tab 内：不需要小标题与顶部分割线。
+            style: { display: 'flex', flexDirection: 'column', gap: '8px' },
           }, [
-            h('div', { key: 'versions-title', style: { fontWeight: 600, fontSize: '13px' } }, '版本信息'),
             vd && vd.current
               ? h('div', { key: 'row-dsh-channel', style: styles.statusRow }, [
                   h('span', { key: 'dsh-channel-label', style: styles.hint }, 'DSH 版本偏好：'),
@@ -787,145 +806,338 @@
         var d = draft[0] || settings[0] || {};
         var phase = st ? st.phase : null;
         var serverRunning = phase === 'running' || phase === 'external';
+        var phaseColor = {
+          stopped: 'inherit',
+          starting: '#d29922',
+          running: '#3fb950',
+          external: '#3fb950',
+          error: '#ff6b6b',
+        };
+        // 小标题：第一个（服务信息）紧贴上方，其余保留既有间距（不放大顶部）。
+        var sectionTitle = { fontWeight: 600, fontSize: '13px' };
+        var sectionTitleSpaced = Object.assign({}, sectionTitle, { marginTop: '18px' });
+        // DSH 风格卡片（对齐 dsh-market 的 .card：主题变量驱动，明暗自适应）。
+        var cardStyle = {
+          background: 'var(--dsw-alias-bg-layer-1, #fff)',
+          border: '1px solid var(--dsw-alias-border-l2, #e5e7eb)',
+          borderRadius: '12px',
+          padding: '14px 16px',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: '12px',
+        };
+        // DSH 风格 tab（对齐 dsh-market 的 .tabs/.tab/.on：底部边框 + 品牌色下划线）。
+        var tabBarStyle = {
+          display: 'flex', gap: '2px',
+          borderBottom: '1px solid var(--dsw-alias-border-l2, #e5e7eb)',
+          alignItems: 'flex-end',
+        };
+        var tabBtnStyle = {
+          border: 'none', background: 'none', font: 'inherit',
+          fontSize: '13px',
+          color: 'var(--dsw-alias-label-secondary, #6b7280)',
+          padding: '7px 12px', cursor: 'pointer',
+          borderBottom: '2px solid transparent',
+          whiteSpace: 'nowrap',
+          // 去掉点击后的浏览器 focus 光环：下划线高亮由单一 state 驱动
+          //（tab[0]），点哪个只有哪个亮，focus ring 会造成「点一个亮一个」的错觉。
+          outline: 'none',
+        };
+        // 关键：高亮用**单一 borderBottom shorthand（含颜色）**替换整条下划线，
+        // 而不是继承 transparent 后再单独覆盖 borderBottomColor——React 对
+        // shorthand + longhand 混用时，切走时可能不清掉 color，导致「点了不灭」。
+        var tabBtnActiveStyle = Object.assign({}, tabBtnStyle, {
+          color: 'var(--dsw-alias-brand-primary, #4f6ef7)',
+          borderBottom: '2px solid var(--dsw-alias-brand-primary, #4f6ef7)',
+          fontWeight: 600,
+        });
+        // 服务信息一行布局：状态 + WebUI 地址同一行（不换行，地址超长省略）。
+        var svcLineStyle = {
+          display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0,
+        };
+        var svcLabelStyle = { fontWeight: 600, whiteSpace: 'nowrap', flexShrink: 0 };
+        var svcValueStyle = {
+          color: 'var(--dsw-alias-label-secondary, #6b7280)',
+          fontSize: '12px',
+          overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+          minWidth: 0,
+        };
+
+        // —— Tab 1：设置（服务信息 / 服务设置 / 其他设置） ——
+        function settingsTab() {
+          return h('div', { key: 'tab-settings', style: { display: 'flex', flexDirection: 'column', gap: '16px' } }, [
+            h('div', { key: 'svc-title', style: sectionTitle }, '服务信息'),
+            h('div', { key: 'svc-card', style: cardStyle }, [
+              h('div', { key: 'svc-status', style: svcLineStyle }, [
+                h('span', { key: 'svc-status-label', style: svcLabelStyle }, '状态：'),
+                h('span', { key: 'svc-status-phase', style: Object.assign({}, svcValueStyle, { color: phaseColor[phase] || 'inherit', fontWeight: 600 }) },
+                  st ? (PHASE_TEXT[phase] || phase) : '未知'),
+                h('span', { key: 'svc-sep', style: { width: 1, height: 12, background: 'var(--dsw-alias-border-l2, #e5e7eb)', flexShrink: 0 } }, null),
+                h('span', { key: 'svc-url-label', style: svcLabelStyle }, 'WebUI 地址：'),
+                h('span', { key: 'svc-url-value', style: svcValueStyle }, st && st.url ? st.url : '—'),
+              ]),
+              h('div', { key: 'actions', style: styles.row }, [
+                // 服务器运行中不显示启动按钮；停止/重启仅在运行时显示。
+                serverRunning ? null : h('button', {
+                  key: 'start',
+                  style: styles.primary,
+                  onClick: function () { sendAction('start'); },
+                }, '启动服务器'),
+                serverRunning ? h('button', {
+                  key: 'stop',
+                  style: styles.danger,
+                  onClick: function () { sendAction('stop'); },
+                }, '停止服务器') : null,
+                serverRunning ? h('button', {
+                  key: 'restart',
+                  style: styles.btn,
+                  onClick: function () { sendAction('restart'); },
+                }, '重启服务器') : null,
+                h('button', {
+                  key: 'focus-panel',
+                  style: styles.btn,
+                  onClick: function () { sendAction('focus-panel'); },
+                }, '进入鲸仔管理后台'),
+              ]),
+            ]),
+            h('div', { key: 'setup-title', style: sectionTitleSpaced }, 'DeepSeek Harness 服务设置'),
+            h('label', { key: 'port', style: styles.field }, [
+              h('span', { key: 'port-label', style: styles.label }, '端口'),
+              h('input', {
+                key: 'port-input',
+                type: 'number', min: 1, max: 65535, style: styles.input,
+                value: d.port == null ? '' : d.port,
+                onInput: function (e) { updateDraft('port', e.target.value); },
+              }),
+              h('span', { key: 'port-hint', style: styles.hint },
+                '端口变更会在保存后自动重启服务器生效'),
+            ]),
+            h('label', { key: 'auto-restart', style: styles.check }, [
+              h('input', {
+                key: 'auto-restart-input',
+                type: 'checkbox',
+                checked: !!d.autoRestart,
+                onChange: function (e) { updateDraft('autoRestart', e.target.checked); },
+              }),
+              h('span', { key: 'auto-restart-label' }, '服务器异常退出后自动重启'),
+            ]),
+            d.nodeDir
+              ? h('div', { key: 'node-dir-info', style: styles.statusRow }, [
+                  h('span', { key: 'node-dir-info-label', style: { fontWeight: 600 } }, 'Node 安装目录：'),
+                  h('span', { key: 'node-dir-info-path', style: styles.hint },
+                    d.nodeDir + '（鲸仔自动检测或安装时写入）'),
+                ])
+              : null,
+            h('div', { key: 'other-title', style: sectionTitleSpaced }, '其他设置'),
+            h('div', { key: 'registry', style: styles.field }, [
+              h('span', { key: 'registry-label', style: styles.label }, '下载节点'),
+              h('input', {
+                key: 'registry-input',
+                type: 'text', style: styles.input,
+                placeholder: 'https://registry.npmjs.org',
+                value: d.registry == null ? '' : d.registry,
+                onInput: function (e) { updateDraft('registry', e.target.value); },
+              }),
+              h('div', { key: 'registry-presets', style: styles.row }, [
+                REGISTRY_PRESETS.map(function (p) {
+                  return h('button', {
+                    key: p.key,
+                    type: 'button',
+                    style: d.registry === p.url ? presetActiveStyle : presetStyle,
+                    onClick: function () { switchRegistry(p.url); },
+                  }, p.label);
+                }),
+              ]),
+              h('span', { key: 'registry-hint', style: styles.hint },
+                '本设置影响 DSH 与插件的下载节点，DSH 的来源不变，请根据网络状况自行选择'),
+            ]),
+            h('label', { key: 'download-dir', style: styles.field }, [
+              h('span', { key: 'download-dir-label', style: styles.label }, '下载目录（可选）'),
+              h('div', { key: 'download-dir-row', style: pickRowStyle }, [
+                h('input', {
+                  key: 'download-dir-input',
+                  type: 'text', style: pickInputStyle,
+                  placeholder: '留空使用系统下载目录',
+                  value: d.downloadDir == null ? '' : d.downloadDir,
+                  onInput: function (e) { updateDraft('downloadDir', e.target.value); },
+                }),
+                h('button', {
+                  key: 'download-dir-pick',
+                  type: 'button',
+                  style: pickButtonStyle,
+                  onClick: function () { pickDir('downloadDir'); },
+                }, '选择…'),
+              ]),
+              h('span', { key: 'download-dir-hint', style: styles.hint },
+                '会话日志等下载的保存位置；留空使用系统下载目录。'),
+            ]),
+            // dsh 命令注册到 PATH（用户级 / 系统级；只影响新开的终端，不影响鲸仔自身）。
+            h('div', { key: 'dsh-path', style: styles.field }, [
+              h('span', { key: 'dsh-path-label', style: styles.label }, 'dsh 命令（终端）'),
+              h('div', { key: 'dsh-path-levels', style: styles.row }, [
+                h('button', {
+                  key: 'dsh-level-user',
+                  type: 'button',
+                  style: dshLevel[0] === 'user' ? presetActiveStyle : presetStyle,
+                  onClick: function () { dshLevel[1]('user'); },
+                }, '用户级'),
+                h('button', {
+                  key: 'dsh-level-system',
+                  type: 'button',
+                  style: dshLevel[0] === 'system' ? presetActiveStyle : presetStyle,
+                  onClick: function () { dshLevel[1]('system'); },
+                }, '系统级'),
+              ]),
+              (function () {
+                var cur = (dshPaths[0] || {})[dshLevel[0]] || null;
+                var stateText;
+                if (!dshPaths[0]) {
+                  stateText = '查询中…';
+                } else if (!cur) {
+                  stateText = '读取失败（请查看运行日志）';
+                } else if (cur.error) {
+                  stateText = '读取失败：' + cur.error;
+                } else {
+                  stateText = cur.registered
+                    ? '已注册（终端可直接使用 dsh）'
+                    : '未注册（终端暂不能使用 dsh）';
+                }
+                return h('div', { key: 'dsh-path-row', style: styles.row }, [
+                  h('span', { key: 'dsh-path-state', style: styles.hint }, stateText),
+                  h('button', {
+                    key: 'dsh-path-toggle-btn',
+                    type: 'button',
+                    style: cur && cur.registered ? presetStyle : presetActiveStyle,
+                    onClick: function () {
+                      var reg = !!(cur && cur.registered);
+                      sendAction('dsh-path-toggle', { value: { enable: !reg, level: dshLevel[0] } });
+                    },
+                  }, cur && cur.registered ? '从 PATH 注销' : '注册到系统 PATH'),
+                ]);
+              })(),
+              h('span', { key: 'dsh-path-hint', style: styles.hint },
+                dshLevel[0] === 'system'
+                  ? '系统级 PATH 影响所有用户，需要管理员权限（Windows 需以管理员运行鲸仔，macOS 需 sudo）；注册后需新开终端生效'
+                  : '注册后可在终端直接使用 dsh 命令（需新开终端生效）；不影响鲸仔自身运行，随时可注销'),
+            ]),
+            h('label', { key: 'autostart', style: styles.check }, [
+              h('input', {
+                key: 'autostart-input',
+                type: 'checkbox',
+                checked: !!d.autostart,
+                onChange: function (e) { updateDraft('autostart', e.target.checked); },
+              }),
+              h('span', { key: 'autostart-label' }, '开机自启本程序'),
+            ]),
+            h('label', { key: 'pet', style: styles.check }, [
+              h('input', {
+                key: 'pet-input',
+                type: 'checkbox',
+                checked: !!d.petEnabled,
+                onChange: function (e) { updateDraft('petEnabled', e.target.checked); },
+              }),
+              h('span', { key: 'pet-label' }, '显示桌宠'),
+            ]),
+            h('div', { key: 'save-row', style: styles.row },
+              h('button', { key: 'save', style: styles.primary, onClick: save }, '保存设置')),
+          ]);
+        }
+
+        // —— Tab 2：内置插件（社区风险声明 + 开关；禁用 ≠ 卸载） ——
+        function pluginsTab() {
+          var list = plugins[0] || [];
+          return h('div', { key: 'tab-plugins', style: { display: 'flex', flexDirection: 'column', gap: '10px' } }, [
+            h('div', { key: 'plugins-warn', style: { border: '1px solid rgba(210,153,34,.5)', borderRadius: '10px', padding: '10px 12px', fontSize: '12px', color: '#d29922', lineHeight: 1.6 } },
+              '鲸仔内置的 cordis 插件由社区开发，可能会存在不稳定性或安装风险，请谨慎使用。'),
+            list.map(function (p) {
+              var rowStyle = {
+                display: 'flex', alignItems: 'center', gap: '10px',
+                border: '1px solid rgba(127,127,127,.25)',
+                borderRadius: '10px', padding: '10px 12px',
+              };
+              var infoStyle = { flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: '2px' };
+              var actionBtn;
+              if (p.builtin) {
+                actionBtn = h('span', { key: 'builtin-' + p.id, style: styles.hint }, '内置（不可禁用）');
+              } else if (p.installable && !p.installed) {
+                actionBtn = h('button', {
+                  key: 'install-' + p.id,
+                  type: 'button',
+                  style: presetActiveStyle,
+                  onClick: function () { sendAction('install-market'); },
+                }, '安装');
+              } else {
+                actionBtn = h('button', {
+                  key: 'toggle-' + p.id,
+                  type: 'button',
+                  style: p.disabled ? presetActiveStyle : presetStyle,
+                  onClick: function () {
+                    // enabled = 目标状态（禁用中点「启用」→ true）。
+                    sendAction('toggle-plugin', { value: { id: p.id, enabled: !!p.disabled } });
+                  },
+                }, p.disabled ? '已禁用（点击启用）' : '已启用（点击禁用）');
+              }
+              return h('div', { key: p.id, style: rowStyle }, [
+                h('div', { key: p.id + '-info', style: infoStyle }, [
+                  h('div', { key: p.id + '-name', style: { fontWeight: 600, fontSize: '13px' } }, p.name),
+                  h('div', { key: p.id + '-desc', style: styles.hint }, p.description),
+                ]),
+                actionBtn,
+              ]);
+            }),
+            restartHint[0]
+              ? h('div', { key: 'restart-hint', style: styles.statusRow }, [
+                  h('span', { key: 'restart-hint-text', style: styles.hint },
+                    '插件状态已变更，重启服务器后生效'),
+                  h('button', {
+                    key: 'restart-btn',
+                    type: 'button',
+                    style: presetActiveStyle,
+                    onClick: function () { sendAction('restart-server'); },
+                  }, '立即重启'),
+                ])
+              : null,
+          ]);
+        }
+
+        // —— Tab 3：版本信息（原版本块） ——
+        function versionTab() {
+          return h('div', { key: 'tab-versions', style: { display: 'flex', flexDirection: 'column', gap: '8px' } }, [
+            versionBlock(),
+          ]);
+        }
+
+        // 页脚：居中 logo + 名称（原顶部 logo 移到这里）。
+        function footerBlock() {
+          return h('div', { key: 'whalito-foot', style: { display: 'flex', justifyContent: 'center', marginTop: '28px', padding: '24px 0 8px', borderTop: '1px solid var(--dsw-alias-border-l2, #e5e7eb)' } }, [
+            h('div', { key: 'foot-inner', style: { display: 'flex', alignItems: 'center', gap: '10px' } }, [
+              h('img', {
+                key: 'foot-logo',
+                src: APP_ICON_SRC,
+                width: 32, height: 32,
+                style: { borderRadius: '8px', display: 'block' },
+                alt: '鲸仔',
+              }),
+              h('div', { key: 'foot-text', style: { display: 'flex', flexDirection: 'column', gap: '1px' } }, [
+                h('span', { key: 'foot-name', style: { fontWeight: 600, fontSize: '13px', lineHeight: 1.4 } }, '鲸仔Whalito'),
+                h('span', { key: 'foot-sub', style: styles.hint }, '你的DeepSeek Harness桌面搭子'),
+              ]),
+            ]),
+          ]);
+        }
 
         return h('div', { style: styles.root }, [
           headerBlock(),
-          h('div', { key: 'status', style: styles.statusRow }, [
-            h('span', { key: 'status-label', style: { fontWeight: 600 } }, '服务器：'),
-            h('span', { key: 'status-phase' }, st ? (PHASE_TEXT[phase] || phase) : '未知'),
-            st && st.url ? h('span', { key: 'status-url', style: styles.hint }, st.url) : null,
+          h('div', { key: 'tabs', style: tabBarStyle }, [
+            h('button', { key: 'tab-btn-settings', type: 'button', style: tab[0] === 'settings' ? tabBtnActiveStyle : tabBtnStyle, onClick: function () { tab[1]('settings'); } }, '设置'),
+            h('button', { key: 'tab-btn-plugins', type: 'button', style: tab[0] === 'plugins' ? tabBtnActiveStyle : tabBtnStyle, onClick: function () { tab[1]('plugins'); } }, '内置插件'),
+            h('button', { key: 'tab-btn-versions', type: 'button', style: tab[0] === 'versions' ? tabBtnActiveStyle : tabBtnStyle, onClick: function () { tab[1]('versions'); } }, '版本信息'),
           ]),
-          h('div', { key: 'actions', style: styles.row }, [
-            // 服务器运行中不显示启动按钮；停止/重启仅在运行时显示。
-            serverRunning ? null : h('button', {
-              key: 'start',
-              style: styles.primary,
-              onClick: function () { sendAction('start'); },
-            }, '启动服务器'),
-            serverRunning ? h('button', {
-              key: 'stop',
-              style: styles.danger,
-              onClick: function () { sendAction('stop'); },
-            }, '停止服务器') : null,
-            serverRunning ? h('button', {
-              key: 'restart',
-              style: styles.btn,
-              onClick: function () { sendAction('restart'); },
-            }, '重启服务器') : null,
-            h('button', {
-              key: 'focus-panel',
-              style: styles.btn,
-              onClick: function () { sendAction('focus-panel'); },
-            }, '进入鲸仔管理后台'),
-          ]),
-          h('label', { key: 'port', style: styles.field }, [
-            h('span', { key: 'port-label', style: styles.label }, '端口'),
-            h('input', {
-              key: 'port-input',
-              type: 'number', min: 1, max: 65535, style: styles.input,
-              value: d.port == null ? '' : d.port,
-              onInput: function (e) { updateDraft('port', e.target.value); },
-            }),
-          ]),
-          h('div', { key: 'registry', style: styles.field }, [
-            h('span', { key: 'registry-label', style: styles.label }, 'npm 镜像源'),
-            h('input', {
-              key: 'registry-input',
-              type: 'text', style: styles.input,
-              placeholder: 'https://registry.npmjs.org',
-              value: d.registry == null ? '' : d.registry,
-              onInput: function (e) { updateDraft('registry', e.target.value); },
-            }),
-            h('div', { key: 'registry-presets', style: styles.row }, [
-              REGISTRY_PRESETS.map(function (p) {
-                return h('button', {
-                  key: p.key,
-                  type: 'button',
-                  style: d.registry === p.url ? presetActiveStyle : presetStyle,
-                  onClick: function () { switchRegistry(p.url); },
-                }, p.label);
-              }),
-            ]),
-          ]),
-          h('label', { key: 'workspace', style: styles.field }, [
-            h('span', { key: 'workspace-label', style: styles.label }, '工作目录（可选）'),
-            h('div', { key: 'workspace-row', style: pickRowStyle }, [
-              h('input', {
-                key: 'workspace-input',
-                type: 'text', style: pickInputStyle,
-                placeholder: '留空使用默认目录',
-                value: d.workspaceDir == null ? '' : d.workspaceDir,
-                onInput: function (e) { updateDraft('workspaceDir', e.target.value); },
-              }),
-              h('button', {
-                key: 'workspace-pick',
-                type: 'button',
-                style: pickButtonStyle,
-                onClick: function () { pickDir('workspaceDir'); },
-              }, '选择…'),
-            ]),
-            h('span', { key: 'workspace-hint', style: styles.hint },
-              'DSH 服务器的工作目录，会话里终端等相对路径以此为基准；留空使用默认目录。'),
-          ]),
-          d.nodeDir
-            ? h('div', { key: 'node-dir-info', style: styles.statusRow }, [
-                h('span', { key: 'node-dir-info-label', style: { fontWeight: 600 } }, 'Node 安装目录：'),
-                h('span', { key: 'node-dir-info-path', style: styles.hint },
-                  d.nodeDir + '（鲸仔自动检测或安装时写入）'),
-              ])
-            : null,
-          h('label', { key: 'download-dir', style: styles.field }, [
-            h('span', { key: 'download-dir-label', style: styles.label }, '下载目录（可选）'),
-            h('div', { key: 'download-dir-row', style: pickRowStyle }, [
-              h('input', {
-                key: 'download-dir-input',
-                type: 'text', style: pickInputStyle,
-                placeholder: '留空使用系统下载目录',
-                value: d.downloadDir == null ? '' : d.downloadDir,
-                onInput: function (e) { updateDraft('downloadDir', e.target.value); },
-              }),
-              h('button', {
-                key: 'download-dir-pick',
-                type: 'button',
-                style: pickButtonStyle,
-                onClick: function () { pickDir('downloadDir'); },
-              }, '选择…'),
-            ]),
-            h('span', { key: 'download-dir-hint', style: styles.hint },
-              '会话日志等下载的保存位置；留空使用系统下载目录。'),
-          ]),
-          h('label', { key: 'autostart', style: styles.check }, [
-            h('input', {
-              key: 'autostart-input',
-              type: 'checkbox',
-              checked: !!d.autostart,
-              onChange: function (e) { updateDraft('autostart', e.target.checked); },
-            }),
-            h('span', { key: 'autostart-label' }, '开机自启本程序'),
-          ]),
-          h('label', { key: 'auto-restart', style: styles.check }, [
-            h('input', {
-              key: 'auto-restart-input',
-              type: 'checkbox',
-              checked: !!d.autoRestart,
-              onChange: function (e) { updateDraft('autoRestart', e.target.checked); },
-            }),
-            h('span', { key: 'auto-restart-label' }, '服务器异常退出后自动重启'),
-          ]),
-          h('label', { key: 'pet', style: styles.check }, [
-            h('input', {
-              key: 'pet-input',
-              type: 'checkbox',
-              checked: !!d.petEnabled,
-              onChange: function (e) { updateDraft('petEnabled', e.target.checked); },
-            }),
-            h('span', { key: 'pet-label' }, '显示桌宠'),
-          ]),
-          h('div', { key: 'save-row', style: styles.row },
-            h('button', { key: 'save', style: styles.primary, onClick: save }, '保存设置')),
-          versionBlock(),
+          tab[0] === 'settings' ? settingsTab() : null,
+          tab[0] === 'plugins' ? pluginsTab() : null,
+          tab[0] === 'versions' ? versionTab() : null,
+          footerBlock(),
           notice[0] ? h('div', { key: 'notice', style: styles.error }, notice[0]) : null,
-          h('div', { key: 'hint', style: styles.hint }, '端口变更会在保存后自动重启服务器生效。'),
         ]);
       }
 

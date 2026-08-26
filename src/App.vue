@@ -6,8 +6,11 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { dshOrigin, isWhalitoMessage, postToDsh, toPlain } from "./whalitoBridge";
 import LoadingScreen from "./LoadingScreen.vue";
 import type {
+  DshPathView,
+  DshPathsSnapshot,
   VersionsSnapshot,
   WhalitoMessage,
+  WhalitoPluginEntry,
   WhalitoSettings,
   WhalitoVersionInfo,
 } from "./whalitoBridge";
@@ -79,6 +82,52 @@ const showSettings = ref(false);
 const confirmingStop = ref(false);
 const autoRestartCount = ref(0);
 const MAX_AUTO_RESTART = 3;
+
+// 插件市场（dsh-market）状态：bundles 判定 + installedOnce 标记。
+const marketInstalled = ref(false);
+const marketOnce = ref(false);
+// 内置插件列表（hello 快照带给「鲸仔设置」分区的内置插件 tab）。
+const plugins = ref<WhalitoPluginEntry[]>([]);
+// dsh 命令注册到 PATH 的状态（用户级 / 系统级；设置分区「其他设置」展示）。
+const dshPaths = ref<DshPathsSnapshot>({ user: null, system: null });
+
+async function loadPlugins() {
+  plugins.value = await invoke<WhalitoPluginEntry[]>("plugins_status").catch(() => []);
+}
+
+async function loadDshPaths() {
+  const [user, system] = await Promise.all([
+    invoke<DshPathView>("dsh_path_status", { level: "user" }).catch((e) => {
+      logs.value.push(`[系统] 读取用户级 PATH 状态失败：${typeof e === "string" ? e : String(e)}`);
+      return null;
+    }),
+    invoke<DshPathView>("dsh_path_status", { level: "system" }).catch((e) => {
+      logs.value.push(`[系统] 读取系统级 PATH 状态失败：${typeof e === "string" ? e : String(e)}`);
+      return null;
+    }),
+  ]);
+  dshPaths.value = { user, system };
+}
+
+async function loadMarketStatus() {
+  try {
+    const s = await invoke<{ installed: boolean; installed_once: boolean }>("market_status");
+    marketInstalled.value = s.installed;
+    marketOnce.value = s.installed_once;
+  } catch {
+    /* 忽略瞬时错误 */
+  }
+}
+
+/** 面板「插件市场」：检查/安装（force=false）或显式重新安装（force=true）。 */
+async function syncMarket(force = false) {
+  await wrap(`正在${force ? "重新安装" : "检查"}插件市场…`, async () => {
+    const msg = await invoke<string>("sync_market_plugin", { force });
+    notice.value = msg;
+    await loadMarketStatus();
+    return msg;
+  });
+}
 
 // 内嵌 DSH 页面右键自定义菜单（复制/剪切/粘贴 ─ 刷新页面 / 重启服务器 / 显示隐藏桌宠）的位置；null = 关闭。
 const ctxMenu = ref<{ x: number; y: number } | null>(null);
@@ -680,6 +729,8 @@ function pushSnapshot() {
     settings: settings.value ? toPlain(settings.value) : null,
     status: toPlain(server.value),
     versions: toPlain(buildVersions()),
+    plugins: toPlain(plugins.value),
+    dshPaths: toPlain(dshPaths.value),
   });
   if (err !== null) {
     invoke("bridge_diag", { line: `推送快照失败：${err}` }).catch(() => {});
@@ -726,6 +777,7 @@ async function processWhalitoMessage(msg: WhalitoMessage, eventOrigin: string) {
       logs.value.push("[系统] 鲸仔设置分区已连接（收到内嵌页握手请求）");
       invoke("bridge_diag", { line: `收到 ping，origin=${eventOrigin}` }).catch(() => {});
     }
+    await loadPlugins();
     pushSnapshot();
     return;
   }
@@ -794,6 +846,89 @@ async function processWhalitoMessage(msg: WhalitoMessage, eventOrigin: string) {
       goPanel();
       return;
     }
+    if (action === "toggle-plugin") {
+      // 内置插件开关：改 patch 标记块（禁用 ≠ 卸载），重启服务器后生效。
+      const v = msg.value as { id?: string; enabled?: boolean } | null;
+      if (!v || typeof v.id !== "string" || typeof v.enabled !== "boolean") {
+        postWhalitoError("无效的插件开关请求");
+        return;
+      }
+      const list = await invoke<WhalitoPluginEntry[]>("toggle_plugin", {
+        id: v.id,
+        enabled: v.enabled,
+      }).catch((e) => {
+        postWhalitoError(typeof e === "string" ? e : String(e));
+        return null;
+      });
+      if (list) {
+        plugins.value = list;
+        postToDsh(embedFrame.value, {
+          channel: "whalito",
+          type: "plugins",
+          plugins: toPlain(list),
+        });
+      }
+      return;
+    }
+    if (action === "install-market") {
+      // dshmarket 被卸载后从「内置插件」tab 恢复安装：force=true 是用户显式
+      // 意图（清除 installedOnce），否则已卸载过的用户会被「不自动装回」拒绝。
+      const r = await invoke<string>("sync_market_plugin", { force: true }).catch((e) => {
+        postWhalitoError(typeof e === "string" ? e : String(e));
+        return null;
+      });
+      if (r) {
+        postToDsh(embedFrame.value, {
+          channel: "whalito",
+          type: "notice",
+          message: r,
+        });
+      }
+      // 场景「禁用 dshmarket → 卸载 → 再安装」：patch 里残留 disabled 覆盖行，
+      // 不清理的话重启后市场仍处于禁用态。安装成功即视为用户想用它，顺带启用。
+      const market = plugins.value.find((p) => p.id === "dsh-market");
+      if (market && market.disabled) {
+        await invoke<WhalitoPluginEntry[]>("toggle_plugin", {
+          id: "dsh-market",
+          enabled: true,
+        }).catch(() => {});
+      }
+      // 刷新本地插件状态并推送快照（分区「内置插件」tab 要看到安装后的变化）。
+      await loadPlugins();
+      pushSnapshot();
+      return;
+    }
+    if (action === "restart-server") {
+      await restartServer();
+      embedNonce.value += 1;
+      pushSnapshot();
+      return;
+    }
+    if (action === "dsh-path-toggle") {
+      // 一键注册/注销 dsh 到 PATH（user / system 两级）；只影响新开的终端。
+      const v = msg.value as { enable?: boolean; level?: string } | null;
+      const level = v?.level === "system" ? "system" : "user";
+      if (!v || typeof v.enable !== "boolean") {
+        postWhalitoError("无效的 PATH 注册请求");
+        return;
+      }
+      const r = await invoke<DshPathView>("dsh_path_toggle", {
+        enable: v.enable,
+        level,
+      }).catch((e) => {
+        postWhalitoError(typeof e === "string" ? e : String(e));
+        return null;
+      });
+      if (r) {
+        dshPaths.value = { ...dshPaths.value, [level]: r };
+        postToDsh(embedFrame.value, {
+          channel: "whalito",
+          type: "dsh-path",
+          dshPath: toPlain(r),
+        });
+      }
+      return;
+    }
     if (action === "check-update") {
       const target = msg.target;
       if (target === "dsh") {
@@ -812,6 +947,17 @@ async function processWhalitoMessage(msg: WhalitoMessage, eventOrigin: string) {
       return;
     }
     if (action === "update-dsh") {
+      // 升级前先让用户确认「已备份插件信息」（鲸仔会自动备份配置与插件，
+      // 双保险再确认一次）；取消则不开始升级。
+      const confirmed = await invoke<boolean>("confirm_dsh_update").catch(() => false);
+      if (!confirmed) {
+        postToDsh(embedFrame.value, {
+          channel: "whalito",
+          type: "notice",
+          message: "已取消升级（未执行备份确认）",
+        });
+        return;
+      }
       // 设置页「立即更新」：停止 → 更新 → 启动；进度经 install-stage → update-progress 回传。
       installingDsh.value = true;
       dshUpdateMessage.value = "正在更新 DeepSeek Harness…";
@@ -842,15 +988,24 @@ async function processWhalitoMessage(msg: WhalitoMessage, eventOrigin: string) {
       return;
     }
     if (action === "apply-update") {
+      // 先弹原生确认框（此时全屏 loading 尚未打开）；用户确认后才进入
+      // 「正在更新」状态并执行（skipConfirm=true 跳过 Rust 内部二次确认）。
+      const confirmed = await invoke<boolean>("confirm_whalito_update").catch(() => false);
+      if (!confirmed) {
+        postToDsh(embedFrame.value, {
+          channel: "whalito",
+          type: "notice",
+          message: "已取消更新",
+        });
+        return;
+      }
       // 命令末尾会退出应用（安装链接管重启），不 await；失败时回传错误。
-      // 先进入全屏「正在更新」状态，让下载/安装进度可见，消除「点了没反应」的割裂。
+      // 确认后才进入全屏「正在更新」状态，让下载/安装进度可见。
       whalitoUpdating.value = true;
       whalitoUpdateMessage.value = "正在准备更新…";
-      invoke("whalito_apply_update").then(
+      invoke("whalito_apply_update", { skipConfirm: true }).then(
         () => {
-          // 命令正常返回只有一种情况：用户在原生确认框点了「取消」
-          //（真正更新成功时应用已退出，不会走到这里）。取消也要收起遮罩，
-          // 否则界面会一直停在「鲸仔正在更新…」。
+          // 命令正常返回只有一种情况：更新链异常提前返回（成功时应用已退出）。
           whalitoUpdating.value = false;
           whalitoUpdateMessage.value = "";
         },
@@ -1093,6 +1248,18 @@ onMounted(async () => {
       }
     }),
   );
+  // DSH 被插件（dsh-market 等）自重启后，鲸仔按端口接管新进程并发本事件。
+  unlisteners.push(
+    await listen<number>("server-restarted", async (e) => {
+      server.value = await invoke<ServerStatus>("server_status").catch(() => server.value);
+      notice.value = `DSH 已自行重启（插件市场等触发），鲸仔已重新接管（新进程 ${e.payload}）`;
+      // 内嵌页重载以恢复连接（iframe 因 :key 变化重建）。
+      embedNonce.value += 1;
+      window.setTimeout(() => {
+        if (notice.value.startsWith("DSH 已自行重启")) notice.value = "";
+      }, 8000);
+    }),
+  );
   unlisteners.push(
     await listen<string>("tray-action", (e) => {
       if (e.payload === "start") startServer();
@@ -1147,6 +1314,10 @@ onMounted(async () => {
   window.addEventListener("contextmenu", onPanelContextMenu);
 
   await Promise.all([loadSettings(), refreshLogs()]);
+  // 状态快照（插件 / PATH）加载完成后补推一次，避免分区首屏 hello 拿到空数据
+  // 而一直显示「查询中… / 空列表」（此前 load 完成后不推送，连接后 ping 停止）。
+  await Promise.all([loadMarketStatus(), loadPlugins(), loadDshPaths()]);
+  pushSnapshot();
   platform.value = await invoke<string>("get_platform").catch(() => "windows");
   // 鲸仔自更新重启后：校验更新是否成功（标记一次性，读后即删）。
   invoke<UpdateMarkerResult | null>("whalito_update_result")
@@ -1395,6 +1566,29 @@ function autoScroll() {
       <p v-if="server.phase === 'external'" class="hint warn">
         该服务器由外部启动；点击「停止服务器」将按端口定位并结束对应进程（需二次确认）。
       </p>
+
+      <!-- 插件市场（dsh-market）：启动前自动预装，这里可手动检查 / 显式重装 -->
+      <div class="market-row">
+        <span class="hint">
+          插件市场：
+          <b>{{
+            marketInstalled
+              ? "已就绪（DSH 设置页可见）"
+              : marketOnce
+                ? "已卸载（鲸仔不会自动装回）"
+                : "未安装（首次启动时自动安装）"
+          }}</b>
+        </span>
+        <button class="ghost small" :disabled="!!busy" @click="syncMarket(false)">检查 / 安装</button>
+        <button
+          v-if="marketOnce && !marketInstalled"
+          class="ghost small"
+          :disabled="!!busy"
+          @click="syncMarket(true)"
+        >
+          重新安装
+        </button>
+      </div>
 
       <div v-if="showSettings && settings" class="modal-backdrop" @click.self="showSettings = false">
         <div class="modal">

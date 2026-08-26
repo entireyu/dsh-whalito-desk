@@ -44,6 +44,31 @@ export interface VersionsSnapshot {
   whalito: WhalitoVersionInfo;
 }
 
+/** 鲸仔内置插件状态行（hello 快照 / plugins 下行消息）。 */
+export interface WhalitoPluginEntry {
+  id: string;
+  name: string;
+  description: string;
+  builtin: boolean;
+  installable: boolean;
+  installed: boolean;
+  disabled: boolean;
+}
+
+/** dsh 命令注册到系统 PATH 的状态（hello 快照；level: user | system）。 */
+export interface DshPathView {
+  registered: boolean;
+  prefix: string;
+  platform: string;
+  level: string;
+}
+
+/** 两级 PATH 状态（hello 快照 / dsh-path 下行消息携带单级别）。 */
+export interface DshPathsSnapshot {
+  user: DshPathView | null;
+  system: DshPathView | null;
+}
+
 export interface WhalitoMessage {
   channel: "whalito";
   type: string;
@@ -53,6 +78,12 @@ export interface WhalitoMessage {
   status?: WhalitoStatus;
   message?: string;
   versions?: VersionsSnapshot;
+  /** 内置插件列表（hello 快照 / plugins 下行消息）。 */
+  plugins?: WhalitoPluginEntry[] | null;
+  /** dsh 命令 PATH 注册状态（hello 快照）。 */
+  dshPaths?: DshPathsSnapshot | null;
+  /** dsh-path 下行消息的单级别视图。 */
+  dshPath?: DshPathView | null;
   target?: string;
   url?: unknown;
   /** 右键菜单复制上行的选区文本、粘贴下行的待插入文本。 */

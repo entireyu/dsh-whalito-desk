@@ -1,4 +1,5 @@
 {
   "productName": "Whalito-Test",
-  "identifier": "com.deepseek.dsh-launcher.test"
+  "identifier": "com.deepseek.dsh-launcher.test",
+  "mainBinaryName": "Whalito-Test"
 }
