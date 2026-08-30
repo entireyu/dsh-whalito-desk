@@ -81,9 +81,8 @@ fn setup_tray(app: &tauri::AppHandle) -> tauri::Result<tauri::tray::TrayIcon> {
                 let _ = pet::set_enabled(app, enabled);
             }
             "quit" => {
-                app.state::<AppState>().quitting.store(true, Ordering::SeqCst);
-                app.state::<AppState>().pet_stop.store(true, Ordering::SeqCst);
-                app.exit(0);
+                // 统一退出入口：按「服务跟随鲸仔程序停止」设置决定是否先停服。
+                crate::commands::quit_app(app);
             }
             _ => {}
         })

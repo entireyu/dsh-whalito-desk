@@ -64,6 +64,12 @@ interface Settings {
   nodeDir: string | null;
   downloadDir: string | null;
   petEnabled: boolean;
+  /** 服务跟随鲸仔程序停止（默认关）：退出鲸仔时同时停止由鲸仔启动的 DSH 服务。 */
+  dshStopWithWhalito: boolean;
+  /** 自动检查 DSH 更新（默认开）：关闭后后台不再自动检查，手动检查不受影响。 */
+  dshAutoCheckUpdate: boolean;
+  /** 自动检查鲸仔更新（默认开）：关闭后后台不再自动检查，手动检查不受影响。 */
+  whalitoAutoCheckUpdate: boolean;
 }
 
 const env = ref<EnvInfo | null>(null);
@@ -1330,8 +1336,12 @@ onMounted(async () => {
     .catch(() => {});
   pollTimer = window.setInterval(refreshStatus, 3000);
   await runFlow();
-  checkLatest();
-  versionTimer = window.setInterval(checkLatest, 5 * 60 * 1000);
+  // 自动检查更新（DSH）关闭时不启动静默版本查询（启动时初始检查 + 每 5 分钟
+  // 轮询都属于「自动检查」；设置分区的手动「检查更新」按钮不受影响）。
+  if (settings.value?.dshAutoCheckUpdate) {
+    checkLatest();
+    versionTimer = window.setInterval(checkLatest, 5 * 60 * 1000);
+  }
 });
 
 onUnmounted(() => {
@@ -1632,6 +1642,18 @@ function autoScroll() {
             <label class="check">
               <input v-model="settings.autoRestart" type="checkbox" />
               <span>服务器异常退出后自动重启</span>
+            </label>
+            <label class="check">
+              <input v-model="settings.dshStopWithWhalito" type="checkbox" />
+              <span>服务跟随鲸仔程序停止</span>
+            </label>
+            <label class="check">
+              <input v-model="settings.dshAutoCheckUpdate" type="checkbox" />
+              <span>开启自动检查更新（DeepSeek Harness）</span>
+            </label>
+            <label class="check">
+              <input v-model="settings.whalitoAutoCheckUpdate" type="checkbox" />
+              <span>开启自动检查更新（鲸仔）</span>
             </label>
             <label class="check">
               <input v-model="settings.petEnabled" type="checkbox" @change="togglePet" />

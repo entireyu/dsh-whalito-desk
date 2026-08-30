@@ -140,16 +140,38 @@ pub fn now_millis() -> u64 {
         .unwrap_or(0)
 }
 
+/// 自动检查开关（0.5.1）：按目标读取设置。关闭后后台每小时检查不再查询
+/// 该目标（省网络请求）；手动「检查更新」（whalito_check_update /
+/// check_latest_version）不受影响，始终可用。
+pub fn auto_check_enabled(settings: &state::Settings, target: &str) -> bool {
+    match target {
+        "dsh" => settings.dsh_auto_check_update,
+        "whalito" => settings.whalito_auto_check_update,
+        _ => true,
+    }
+}
+
 /// 后台每小时调用的更新检查：汇总 DSH 与鲸仔的可用更新（含更新日志），
-/// 跳过处于静默期（暂不更新）的目标；单个来源网络失败只跳过该目标，不影响其余。
+/// 跳过处于静默期（暂不更新）的目标与关闭了自动检查的目标；
+/// 单个来源网络失败只跳过该目标，不影响其余。
 pub fn check_update_notices(app: &AppHandle) -> Vec<UpdateNotice> {
     let snooze = state::load_update_snooze(app);
     let now = now_millis();
     let mut out = Vec::new();
 
+    // 自动检查开关 + DSH 检查参数：合并一次读取（DSH 分支共用，避免重复加锁）。
+    let settings = {
+        let st = app.state::<AppState>();
+        let guard = st.settings.lock().unwrap();
+        let s = guard.clone();
+        s
+    };
+    let auto_whalito = auto_check_enabled(&settings, "whalito");
+    let auto_dsh = auto_check_enabled(&settings, "dsh");
+
     // —— 鲸仔 ——
     let whalito_snoozed = snooze.whalito.map(|t| t > now).unwrap_or(false);
-    if !whalito_snoozed {
+    if auto_whalito && !whalito_snoozed {
         if let Ok(info) = fetch_release_info() {
             let current = current_version();
             // 与设置分区语义一致：仅当有匹配当前变体的安装包资产才提示
@@ -170,16 +192,12 @@ pub fn check_update_notices(app: &AppHandle) -> Vec<UpdateNotice> {
 
     // —— DSH ——
     let dsh_snoozed = snooze.dsh.map(|t| t > now).unwrap_or(false);
-    if !dsh_snoozed {
-        let st = app.state::<AppState>();
-        let (node_dir, registry, channel) = {
-            let s = st.settings.lock().unwrap();
-            (
-                s.node_dir.clone(),
-                s.registry.clone(),
-                state::normalize_dsh_channel(&s.dsh_channel).to_string(),
-            )
-        };
+    if auto_dsh && !dsh_snoozed {
+        let (node_dir, registry, channel) = (
+            settings.node_dir.clone(),
+            settings.registry.clone(),
+            state::normalize_dsh_channel(&settings.dsh_channel).to_string(),
+        );
         let env = state::detect_env(node_dir.as_deref());
         if let Some(current) = env.dsh_version {
             if let Some(latest) =
@@ -700,6 +718,23 @@ fn emit(app: &AppHandle, stage: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn auto_check_enabled_gates_per_target() {
+        // 默认两个目标都自动检查；分别关闭互不影响；未知目标视为开启。
+        let mut s = state::Settings::default();
+        assert!(auto_check_enabled(&s, "dsh"));
+        assert!(auto_check_enabled(&s, "whalito"));
+        s.dsh_auto_check_update = false;
+        assert!(!auto_check_enabled(&s, "dsh"));
+        assert!(auto_check_enabled(&s, "whalito"));
+        // 关闭鲸仔自动检查不影响 DSH（先恢复 DSH 为开启，验证互不干扰）。
+        s.dsh_auto_check_update = true;
+        s.whalito_auto_check_update = false;
+        assert!(auto_check_enabled(&s, "dsh"));
+        assert!(!auto_check_enabled(&s, "whalito"));
+        assert!(auto_check_enabled(&s, "unknown"));
+    }
 
     #[test]
     fn update_available_compares_semver() {

@@ -1078,6 +1078,38 @@ pub async fn stop_server(app: AppHandle, st: State<'_, AppState>) -> Result<Serv
         .map_err(|e| e.to_string())?
 }
 
+/// 统一退出入口：托盘「退出」与桌宠右键「退出」共用。
+/// 置位 quitting / pet_stop 后，按「服务跟随鲸仔程序停止」设置决定是否先停服：
+/// - 只停**鲸仔托管**的服务器（pid 已记录，含插件自重启接管后的新进程）；
+/// - 外部启动的服务器（未托管）不停——它不归鲸仔管；
+/// - 鲸仔自更新退出（whalito_apply_update）不走此入口，更新期间服务保持运行
+///   （应用立即重启，停止只会造成无谓中断）。
+/// 停服失败只记日志不阻断退出（best-effort）。
+pub fn quit_app(app: &AppHandle) {
+    let st = app.state::<AppState>();
+    st.quitting.store(true, Ordering::SeqCst);
+    st.pet_stop.store(true, Ordering::SeqCst);
+    let stop_dsh = st.settings.lock().unwrap().dsh_stop_with_whalito;
+    if stop_dsh {
+        let shared = Shared::from_state(&st);
+        let managed_pid = *shared.pid.lock().unwrap();
+        if managed_pid.is_some() {
+            let _ = stop_server_inner(app, &shared);
+            // taskkill /F 是强制杀，这里短等端口释放（最多约 2s），
+            // 让「退出鲸仔后服务已关闭」更可靠；等不到也不阻断退出。
+            let port = shared.settings.lock().unwrap().port;
+            let probe = format!("http://127.0.0.1:{port}");
+            for _ in 0..5 {
+                if !state::health(&probe) {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(400));
+            }
+        }
+    }
+    app.exit(0);
+}
+
 #[tauri::command]
 pub async fn restart_server(app: AppHandle, st: State<'_, AppState>) -> Result<ServerStatus, String> {
     let shared = Shared::from_state(&st);

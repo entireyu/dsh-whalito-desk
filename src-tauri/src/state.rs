@@ -76,9 +76,29 @@ pub struct Settings {
     pub pet_enabled: bool,
     /// DSH 会话导出等下载的保存目录；留空回退系统下载目录。
     pub download_dir: Option<String>,
+    /// 服务跟随鲸仔程序停止（默认关）：开启后，用户退出鲸仔时同时停止
+    /// 由鲸仔启动的 DSH 服务（外部启动的服务不受影响；鲸仔自更新重启除外）。
+    #[serde(default = "default_dsh_stop_with_whalito")]
+    pub dsh_stop_with_whalito: bool,
+    /// 是否自动检查 DSH 更新（默认开）：关闭后后台每小时检查不再查询 DSH，
+    /// 手动「检查更新」不受影响；鲸仔自身的自动检查不受此项控制。
+    #[serde(default = "default_true")]
+    pub dsh_auto_check_update: bool,
+    /// 是否自动检查鲸仔更新（默认开）：关闭后后台每小时检查不再查询鲸仔，
+    /// 手动「检查更新」不受影响；DSH 的自动检查不受此项控制。
+    #[serde(default = "default_true")]
+    pub whalito_auto_check_update: bool,
 }
 
 fn default_pet_enabled() -> bool {
+    true
+}
+
+fn default_dsh_stop_with_whalito() -> bool {
+    false
+}
+
+fn default_true() -> bool {
     true
 }
 
@@ -107,6 +127,9 @@ impl Default for Settings {
             node_dir: None,
             pet_enabled: true,
             download_dir: None,
+            dsh_stop_with_whalito: false,
+            dsh_auto_check_update: true,
+            whalito_auto_check_update: true,
         }
     }
 }
@@ -1212,6 +1235,31 @@ mod tests {
         let with_next = r#"{"port":3080,"registry":"https://registry.npmjs.org","dshChannel":"next","autostart":false,"autoRestart":true,"petEnabled":true}"#;
         let s2: Settings = serde_json::from_str(with_next).unwrap();
         assert_eq!(s2.dsh_channel, "next");
+    }
+
+    #[test]
+    fn settings_deserialize_defaults_missing_051_fields() {
+        // 0.5.1 新增三个配置项；旧版 config.json（无这些字段）必须回落
+        // 「服务跟随停止=关、DSH 自动检查=开、鲸仔自动检查=开」，保持旧行为。
+        let old = r#"{"port":3080,"registry":"https://registry.npmjs.org","autostart":false,"autoRestart":true,"petEnabled":true}"#;
+        let s: Settings = serde_json::from_str(old).unwrap();
+        assert!(!s.dsh_stop_with_whalito);
+        assert!(s.dsh_auto_check_update);
+        assert!(s.whalito_auto_check_update);
+
+        // 显式写入的值往返保留（关闭自动检查、开启跟随停止）。
+        let explicit = r#"{"port":3080,"registry":"https://registry.npmjs.org","autostart":false,"autoRestart":true,"petEnabled":true,"dshStopWithWhalito":true,"dshAutoCheckUpdate":false,"whalitoAutoCheckUpdate":false}"#;
+        let s2: Settings = serde_json::from_str(explicit).unwrap();
+        assert!(s2.dsh_stop_with_whalito);
+        assert!(!s2.dsh_auto_check_update);
+        assert!(!s2.whalito_auto_check_update);
+
+        // Settings::default() 与序列化往返一致。
+        let rt: Settings = serde_json::from_str(&serde_json::to_string(&Settings::default()).unwrap())
+            .unwrap();
+        assert!(!rt.dsh_stop_with_whalito);
+        assert!(rt.dsh_auto_check_update);
+        assert!(rt.whalito_auto_check_update);
     }
 
     #[test]

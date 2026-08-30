@@ -14,6 +14,12 @@ export interface WhalitoSettings {
   /** DSH 会话日志导出等下载的保存目录；空 = 系统下载目录。 */
   downloadDir: string | null;
   petEnabled: boolean;
+  /** 服务跟随鲸仔程序停止（默认关）：退出鲸仔时同时停止由鲸仔启动的 DSH 服务。 */
+  dshStopWithWhalito: boolean;
+  /** 自动检查 DSH 更新（默认开）：关闭后后台不再自动检查，手动检查不受影响。 */
+  dshAutoCheckUpdate: boolean;
+  /** 自动检查鲸仔更新（默认开）：关闭后后台不再自动检查，手动检查不受影响。 */
+  whalitoAutoCheckUpdate: boolean;
 }
 
 export interface WhalitoStatus {

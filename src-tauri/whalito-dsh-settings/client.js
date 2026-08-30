@@ -630,6 +630,11 @@
             nodeDir: base.nodeDir == null || base.nodeDir === '' ? null : base.nodeDir,
             downloadDir: base.downloadDir == null || base.downloadDir === '' ? null : base.downloadDir,
             petEnabled: !!base.petEnabled,
+            // 0.5.1：服务跟随鲸仔程序停止（默认关）。
+            dshStopWithWhalito: !!base.dshStopWithWhalito,
+            // 自动检查更新（DSH / 鲸仔）默认开；旧 hello 快照缺字段按开处理。
+            dshAutoCheckUpdate: base.dshAutoCheckUpdate !== false,
+            whalitoAutoCheckUpdate: base.whalitoAutoCheckUpdate !== false,
           };
         }
 
@@ -863,7 +868,7 @@
           minWidth: 0,
         };
 
-        // —— Tab 1：设置（服务信息 / 服务设置 / 其他设置） ——
+        // —— Tab 1：设置（服务信息 / 服务设置 / 通用设置 / 其他设置） ——
         function settingsTab() {
           return h('div', { key: 'tab-settings', style: { display: 'flex', flexDirection: 'column', gap: '16px' } }, [
             h('div', { key: 'svc-title', style: sectionTitle }, '服务信息'),
@@ -921,6 +926,32 @@
               }),
               h('span', { key: 'auto-restart-label' }, '服务器异常退出后自动重启'),
             ]),
+            // 0.5.1：服务跟随鲸仔程序停止（默认关）——退出鲸仔时同时停止由
+            // 鲸仔启动的 DSH 服务；外部启动的服务不受影响。
+            h('label', { key: 'dsh-stop-with-whalito', style: styles.check }, [
+              h('input', {
+                key: 'dsh-stop-with-whalito-input',
+                type: 'checkbox',
+                checked: !!d.dshStopWithWhalito,
+                onChange: function (e) { updateDraft('dshStopWithWhalito', e.target.checked); },
+              }),
+              h('span', { key: 'dsh-stop-with-whalito-label' }, '服务跟随鲸仔程序停止'),
+            ]),
+            h('span', { key: 'dsh-stop-with-whalito-hint', style: styles.hint },
+              '开启后，退出鲸仔时同时停止由鲸仔启动的 DeepSeek Harness 服务（外部启动的服务不受影响）'),
+            // 0.5.1：DSH 自动检查更新（默认开）——只影响后台自动检查，
+            // 手动「检查更新」不受影响；鲸仔自身的自动检查不受此项控制。
+            h('label', { key: 'dsh-auto-check-update', style: styles.check }, [
+              h('input', {
+                key: 'dsh-auto-check-update-input',
+                type: 'checkbox',
+                checked: d.dshAutoCheckUpdate !== false,
+                onChange: function (e) { updateDraft('dshAutoCheckUpdate', e.target.checked); },
+              }),
+              h('span', { key: 'dsh-auto-check-update-label' }, '开启自动检查更新'),
+            ]),
+            h('span', { key: 'dsh-auto-check-update-hint', style: styles.hint },
+              '关闭后将不会自动检查 DeepSeek Harness 更新，鲸仔自身的自动检查不受影响'),
             d.nodeDir
               ? h('div', { key: 'node-dir-info', style: styles.statusRow }, [
                   h('span', { key: 'node-dir-info-label', style: { fontWeight: 600 } }, 'Node 安装目录：'),
@@ -928,6 +959,40 @@
                     d.nodeDir + '（鲸仔自动检测或安装时写入）'),
                 ])
               : null,
+            // 0.5.1：新增「通用设置」分区（DeepSeek Harness 服务设置之后、
+            // 其他设置之前）——原「其他设置」里的开机自启 / 显示桌宠迁入，
+            // 额外新增鲸仔自动检查更新开关（只影响后台自动检查，手动
+            // 「检查更新」不受影响；DSH 的自动检查不受此项控制）。
+            h('div', { key: 'general-title', style: sectionTitleSpaced }, '通用设置'),
+            h('label', { key: 'autostart', style: styles.check }, [
+              h('input', {
+                key: 'autostart-input',
+                type: 'checkbox',
+                checked: !!d.autostart,
+                onChange: function (e) { updateDraft('autostart', e.target.checked); },
+              }),
+              h('span', { key: 'autostart-label' }, '开机自启本程序'),
+            ]),
+            h('label', { key: 'pet', style: styles.check }, [
+              h('input', {
+                key: 'pet-input',
+                type: 'checkbox',
+                checked: !!d.petEnabled,
+                onChange: function (e) { updateDraft('petEnabled', e.target.checked); },
+              }),
+              h('span', { key: 'pet-label' }, '显示桌宠'),
+            ]),
+            h('label', { key: 'whalito-auto-check-update', style: styles.check }, [
+              h('input', {
+                key: 'whalito-auto-check-update-input',
+                type: 'checkbox',
+                checked: d.whalitoAutoCheckUpdate !== false,
+                onChange: function (e) { updateDraft('whalitoAutoCheckUpdate', e.target.checked); },
+              }),
+              h('span', { key: 'whalito-auto-check-update-label' }, '开启自动检查更新'),
+            ]),
+            h('span', { key: 'whalito-auto-check-update-hint', style: styles.hint },
+              '关闭后将不会自动检查鲸仔更新，DeepSeek Harness 的自动检查不受影响'),
             h('div', { key: 'other-title', style: sectionTitleSpaced }, '其他设置'),
             h('div', { key: 'registry', style: styles.field }, [
               h('span', { key: 'registry-label', style: styles.label }, '下载节点'),
@@ -1019,24 +1084,6 @@
                 dshLevel[0] === 'system'
                   ? '系统级 PATH 影响所有用户，需要管理员权限（Windows 需以管理员运行鲸仔，macOS 需 sudo）；注册后需新开终端生效'
                   : '注册后可在终端直接使用 dsh 命令（需新开终端生效）；不影响鲸仔自身运行，随时可注销'),
-            ]),
-            h('label', { key: 'autostart', style: styles.check }, [
-              h('input', {
-                key: 'autostart-input',
-                type: 'checkbox',
-                checked: !!d.autostart,
-                onChange: function (e) { updateDraft('autostart', e.target.checked); },
-              }),
-              h('span', { key: 'autostart-label' }, '开机自启本程序'),
-            ]),
-            h('label', { key: 'pet', style: styles.check }, [
-              h('input', {
-                key: 'pet-input',
-                type: 'checkbox',
-                checked: !!d.petEnabled,
-                onChange: function (e) { updateDraft('petEnabled', e.target.checked); },
-              }),
-              h('span', { key: 'pet-label' }, '显示桌宠'),
             ]),
             h('div', { key: 'save-row', style: styles.row },
               h('button', { key: 'save', style: styles.primary, onClick: save }, '保存设置')),

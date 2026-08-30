@@ -718,12 +718,11 @@ pub fn show_main_window(app: AppHandle) {
     crate::show_main(&app);
 }
 
-/// 桌宠右键菜单：退出应用（与托盘"退出"一致；DSH 子进程保留运行）。
+/// 桌宠右键菜单：退出应用（与托盘"退出"一致；按「服务跟随鲸仔程序停止」
+/// 设置决定是否先停服，见 commands::quit_app）。
 #[tauri::command]
 pub fn quit_app(app: AppHandle) {
-    app.state::<AppState>().quitting.store(true, Ordering::SeqCst);
-    app.state::<AppState>().pet_stop.store(true, Ordering::SeqCst);
-    app.exit(0);
+    crate::commands::quit_app(&app);
 }
 
 #[cfg(test)]
