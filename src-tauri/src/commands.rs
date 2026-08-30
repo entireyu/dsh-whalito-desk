@@ -3,9 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use tauri::{AppHandle, Emitter, State};
-#[cfg(windows)]
-use tauri::Manager;
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::state::{self, AppState, EnvInfo, ServerStatus, Settings};
 
