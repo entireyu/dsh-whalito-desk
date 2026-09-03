@@ -1,6 +1,6 @@
 {
   "name": "@entireyu/whalito-dsh-settings",
-  "version": "0.2.10",
+  "version": "0.2.11",
   "private": true,
   "description": "鲸仔（Whalito）桌面助手设置分区 —— DSH Web 客户端插件",
   "type": "module",

@@ -856,10 +856,12 @@
           borderBottom: '2px solid var(--dsw-alias-brand-primary, #4f6ef7)',
           fontWeight: 600,
         });
-        // 服务信息一行布局：状态 + WebUI 地址同一行（不换行，地址超长省略）。
+        // 服务信息两行布局：状态一行 + WebUI 地址一行（带 token 的地址很长，
+        // 同行会挤压状态；状态禁收缩，地址独占一行超长省略、hover 显示全文）。
         var svcLineStyle = {
           display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0,
         };
+        var svcInfoStyle = { display: 'flex', flexDirection: 'column', gap: '4px' };
         var svcLabelStyle = { fontWeight: 600, whiteSpace: 'nowrap', flexShrink: 0 };
         var svcValueStyle = {
           color: 'var(--dsw-alias-label-secondary, #6b7280)',
@@ -873,13 +875,17 @@
           return h('div', { key: 'tab-settings', style: { display: 'flex', flexDirection: 'column', gap: '16px' } }, [
             h('div', { key: 'svc-title', style: sectionTitle }, '服务信息'),
             h('div', { key: 'svc-card', style: cardStyle }, [
-              h('div', { key: 'svc-status', style: svcLineStyle }, [
-                h('span', { key: 'svc-status-label', style: svcLabelStyle }, '状态：'),
-                h('span', { key: 'svc-status-phase', style: Object.assign({}, svcValueStyle, { color: phaseColor[phase] || 'inherit', fontWeight: 600 }) },
-                  st ? (PHASE_TEXT[phase] || phase) : '未知'),
-                h('span', { key: 'svc-sep', style: { width: 1, height: 12, background: 'var(--dsw-alias-border-l2, #e5e7eb)', flexShrink: 0 } }, null),
-                h('span', { key: 'svc-url-label', style: svcLabelStyle }, 'WebUI 地址：'),
-                h('span', { key: 'svc-url-value', style: svcValueStyle }, st && st.url ? st.url : '—'),
+              h('div', { key: 'svc-info', style: svcInfoStyle }, [
+                h('div', { key: 'svc-status', style: svcLineStyle }, [
+                  h('span', { key: 'svc-status-label', style: svcLabelStyle }, '状态：'),
+                  h('span', { key: 'svc-status-phase', style: Object.assign({}, svcValueStyle, { flexShrink: 0, color: phaseColor[phase] || 'inherit', fontWeight: 600 }) },
+                    st ? (PHASE_TEXT[phase] || phase) : '未知'),
+                ]),
+                h('div', { key: 'svc-url', style: svcLineStyle }, [
+                  h('span', { key: 'svc-url-label', style: svcLabelStyle }, 'WebUI 地址：'),
+                  h('span', { key: 'svc-url-value', title: st && st.url ? st.url : undefined, style: svcValueStyle },
+                    st && st.url ? st.url : '—'),
+                ]),
               ]),
               h('div', { key: 'actions', style: styles.row }, [
                 // 服务器运行中不显示启动按钮；停止/重启仅在运行时显示。
