@@ -12,6 +12,8 @@ pub struct Shared {
     pub pid: Arc<Mutex<Option<u32>>>,
     pub stop: Arc<AtomicBool>,
     pub url: Arc<Mutex<Option<String>>>,
+    /// DSH ≥ 0.1.2 会话 cookie（见 state.rs AppState.auth_cookie）。
+    pub auth_cookie: Arc<Mutex<Option<String>>>,
     pub logs: Arc<Mutex<VecDeque<String>>>,
     pub settings: Arc<Mutex<Settings>>,
     /// 已装 DSH 是否支持 `--no-open`（None = 未探测，进程级缓存）。
@@ -26,6 +28,7 @@ impl Shared {
             pid: Arc::clone(&st.pid),
             stop: Arc::clone(&st.stop_requested),
             url: Arc::clone(&st.server_url),
+            auth_cookie: Arc::clone(&st.auth_cookie),
             logs: Arc::clone(&st.logs),
             settings: Arc::clone(&st.settings),
             no_open_supported: Arc::clone(&st.no_open_supported),
@@ -842,6 +845,7 @@ pub fn start_server_impl(app: &AppHandle, shared: &Shared) -> Result<ServerStatu
 
     shared.stop.store(false, Ordering::SeqCst);
     *shared.url.lock().unwrap() = None;
+    *shared.auth_cookie.lock().unwrap() = None;
 
     let mut cmd = std::process::Command::new(&node);
     // DSH 家目录与插件同步保持一致（测试构建使用隔离的 ~/.dsh-test）。
@@ -907,6 +911,7 @@ pub fn start_server_impl(app: &AppHandle, shared: &Shared) -> Result<ServerStatu
         let app = app.clone();
         let logs = Arc::clone(&shared.logs);
         let url = Arc::clone(&shared.url);
+        let auth_cookie = Arc::clone(&shared.auth_cookie);
         std::thread::spawn(move || {
             use std::io::{BufRead, BufReader};
             for line in BufReader::new(stream).lines() {
@@ -919,6 +924,15 @@ pub fn start_server_impl(app: &AppHandle, shared: &Shared) -> Result<ServerStatu
                             if slot.is_none() {
                                 *slot = Some(u.clone());
                                 drop(slot);
+                                // DSH ≥ 0.1.2：URL 带进程 token → 立刻做一次信任
+                                // 握手，把会话 cookie 存下来供原生 HTTP/WS 客户端用
+                                // （内嵌 iframe 会在 WebView 里再独立握手一次，互不影响）。
+                                if auth_cookie.lock().unwrap().is_none() && u.contains("?token=")
+                                {
+                                    if let Some(c) = state::capture_auth_cookie(&u) {
+                                        *auth_cookie.lock().unwrap() = Some(c);
+                                    }
+                                }
                                 let _ = app.emit("server-url", &u);
                             }
                         }
@@ -932,6 +946,7 @@ pub fn start_server_impl(app: &AppHandle, shared: &Shared) -> Result<ServerStatu
     let app2 = app.clone();
     let pid_slot = Arc::clone(&shared.pid);
     let url_slot = Arc::clone(&shared.url);
+    let auth_cookie_slot = Arc::clone(&shared.auth_cookie);
     let stop = Arc::clone(&shared.stop);
     let logs = Arc::clone(&shared.logs);
     std::thread::spawn(move || {
@@ -983,6 +998,9 @@ pub fn start_server_impl(app: &AppHandle, shared: &Shared) -> Result<ServerStatu
                 }
             }
             *url_slot.lock().unwrap() = None;
+            // 自重启接管时 url 保留、cookie 仍有效（签名密钥跨进程持久），
+            // 这里只在进程真正退出（无接管）时清掉，避免把旧 cookie 用于别的服务。
+            *auth_cookie_slot.lock().unwrap() = None;
             if !was_stopped {
                 let code = result.as_ref().ok().and_then(|s| s.code()).unwrap_or(-1);
                 state::refresh_tray(&app2, false);
@@ -993,9 +1011,22 @@ pub fn start_server_impl(app: &AppHandle, shared: &Shared) -> Result<ServerStatu
     });
 
     // 就绪等待：轮询健康检查（不依赖 stdout 里 URL 的抽取），带超时。
+    // health() 把 401/403 等应答也算作可达，对 ≥0.1.2 的未认证请求同样能
+    // 立即确认服务已起来，不会再把活着的服务器误判成“30 秒未就绪”。
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     let mut ready = false;
     while std::time::Instant::now() < deadline {
+        // stdout 解析线程可能赶在服务端可应答之前读到 token，这里兜底重试握手。
+        if shared.auth_cookie.lock().unwrap().is_none() {
+            let token_url = shared.url.lock().unwrap().clone();
+            if let Some(u) = token_url {
+                if u.contains("?token=") {
+                    if let Some(c) = state::capture_auth_cookie(&u) {
+                        *shared.auth_cookie.lock().unwrap() = Some(c);
+                    }
+                }
+            }
+        }
         if state::health(&probe) {
             ready = true;
             break;
@@ -1011,16 +1042,44 @@ pub fn start_server_impl(app: &AppHandle, shared: &Shared) -> Result<ServerStatu
         ));
     }
 
-    {
+    // 服务已就绪但握手 cookie 仍未抓到（stdout 线程或轮询里都抢跑失败）：
+    // 此时服务端必然可应答，补几次短尝试，保证原生 HTTP/WS 客户端有会话可用。
+    if shared.auth_cookie.lock().unwrap().is_none() {
+        let token_url = shared.url.lock().unwrap().clone();
+        if let Some(u) = token_url.filter(|x| x.contains("?token=")) {
+            for _ in 0..5 {
+                if let Some(c) = state::capture_auth_cookie(&u) {
+                    *shared.auth_cookie.lock().unwrap() = Some(c);
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+        }
+    }
+
+    // 回填给前端的是“可嵌入”地址：stdout 抽到了带 token 的 URL 就用它
+    // （iframe 直接可完成握手换 cookie），老版本 dsh 没有 token 时退回裸地址。
+    let running_url = {
+        if shared.url.lock().unwrap().is_none() {
+            // announce 行可能比就绪轮询晚几毫秒：给 stdout 解析线程一个
+            // 极短窗口去捕获带 token 的 URL，避免内嵌首屏用裸地址撞 401。
+            for _ in 0..8 {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                if shared.url.lock().unwrap().is_some() {
+                    break;
+                }
+            }
+        }
         let mut slot = shared.url.lock().unwrap();
         if slot.is_none() {
             *slot = Some(probe.clone());
         }
-    }
+        slot.clone().unwrap_or(probe)
+    };
 
     Ok(ServerStatus {
         phase: "running".to_string(),
-        url: Some(probe),
+        url: Some(running_url),
         pid: Some(pid),
     })
 }
@@ -1267,6 +1326,7 @@ pub async fn whalito_download(
     if !is_allowed_download_url(&url, base.as_deref(), settings.port) {
         return Err("仅允许下载本机 DSH 服务器导出的会话日志".to_string());
     }
+    let auth_cookie = st.auth_cookie.lock().unwrap().clone();
     let dir = state::resolve_downloads_dir(&settings)?;
     let filename = sanitize_filename(&filename);
 
@@ -1276,9 +1336,12 @@ pub async fn whalito_download(
         let agent = ureq::AgentBuilder::new()
             .timeout(std::time::Duration::from_secs(600))
             .build();
-        let resp = agent
-            .get(&url)
-            .set("User-Agent", "whalito-download")
+        let mut request = agent.get(&url).set("User-Agent", "whalito-download");
+        // DSH ≥ 0.1.2：/api 需要浏览器会话 cookie。
+        if let Some(cookie) = auth_cookie.as_deref() {
+            request = request.set("Cookie", cookie);
+        }
+        let resp = request
             .call()
             .map_err(|e| format!("下载会话日志失败：{e}"))?;
         let mut reader = resp.into_reader();

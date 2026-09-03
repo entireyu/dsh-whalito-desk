@@ -32,6 +32,9 @@ pub struct AppState {
     pub pid: Arc<Mutex<Option<u32>>>,
     pub stop_requested: Arc<AtomicBool>,
     pub server_url: Arc<Mutex<Option<String>>>,
+    /// DSH ≥ 0.1.2 浏览器信任握手换来的会话 cookie（`dsh-auth-*`，原生
+    /// HTTP/WS 客户端访问 /api 时携带；0.1.1 及更早无认证，保持 None）。
+    pub auth_cookie: Arc<Mutex<Option<String>>>,
     pub logs: Arc<Mutex<VecDeque<String>>>,
     pub settings: Arc<Mutex<Settings>>,
     pub quitting: Arc<AtomicBool>,
@@ -361,11 +364,53 @@ pub fn extract_url(line: &str) -> Option<String> {
     }
 }
 
+/// 服务器是否可达：任一 HTTP 应答（200 / 303 / 401 / 403 …）都视为活着。
+/// DSH ≥ 0.1.2 对未认证请求统一回 401（token 只换一次 cookie），若仍按
+/// “只有 2xx 才算健康” 会把活着的服务器误判为未就绪，导致启动轮询超时。
 pub fn health(url: &str) -> bool {
-    ureq::get(url)
+    match ureq::get(url)
         .timeout(std::time::Duration::from_millis(800))
         .call()
-        .is_ok()
+    {
+        Ok(_) => true,
+        Err(ureq::Error::Status(_, _)) => true,
+        Err(_) => false,
+    }
+}
+
+/// 去掉 URL 的 query/hash，得到干净的基地址。
+/// 原生 HTTP/WS 客户端用它拼 `/api/...` 路径：带 `?token=` 的地址直接拼会
+/// 把路径塞进 query，请求全部打到根路径上。
+pub fn clean_url(url: &str) -> String {
+    let end = url.find(['?', '#']).unwrap_or(url.len());
+    url[..end].trim_end_matches('/').to_string()
+}
+
+/// 从一条 Set-Cookie 头里取出 `name=value` 对（忽略 Max-Age/Path 等属性）。
+fn cookie_pair(header: &str) -> Option<String> {
+    let pair = header.split(';').next()?.trim();
+    let (name, value) = pair.split_once('=')?;
+    if name.is_empty() || value.is_empty() || !name.starts_with("dsh-auth-") {
+        return None;
+    }
+    Some(pair.to_string())
+}
+
+/// 用进程启动 URL 完成一次浏览器信任握手：GET `/` + `?token=`，
+/// 服务端回 303 并签发绑定 authority 的会话 cookie（不跟随重定向，
+/// 否则会错过这条 Set-Cookie）。失败返回 None，调用方稍后重试即可。
+pub fn capture_auth_cookie(token_url: &str) -> Option<String> {
+    let agent = ureq::AgentBuilder::new()
+        .redirects(0)
+        .timeout(std::time::Duration::from_millis(2000))
+        .build();
+    let resp = agent.get(token_url).call().ok()?;
+    for value in resp.all("set-cookie") {
+        if let Some(pair) = cookie_pair(value) {
+            return Some(pair);
+        }
+    }
+    None
 }
 
 pub fn status_from(
@@ -1213,6 +1258,42 @@ fn _unused_order() -> Ordering {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extract_url_keeps_token_query() {
+        let line = "dsh web: http://127.0.0.1:3080/?token=3AqXZ7E_gxGExol-lb0FYPTFmc8ngFkrP3_OPwqxpAss";
+        assert_eq!(
+            extract_url(line).as_deref(),
+            Some("http://127.0.0.1:3080/?token=3AqXZ7E_gxGExol-lb0FYPTFmc8ngFkrP3_OPwqxpAss")
+        );
+    }
+
+    #[test]
+    fn clean_url_strips_token_query() {
+        assert_eq!(
+            clean_url("http://127.0.0.1:3080/?token=abc"),
+            "http://127.0.0.1:3080"
+        );
+        assert_eq!(clean_url("http://127.0.0.1:3080"), "http://127.0.0.1:3080");
+        assert_eq!(
+            clean_url("http://127.0.0.1:3080/?token=a#frag"),
+            "http://127.0.0.1:3080"
+        );
+    }
+
+    #[test]
+    fn cookie_pair_parses_dsh_session_cookie() {
+        let header =
+            "dsh-auth-abc=v1.e30.signature; Max-Age=2592000; Path=/; HttpOnly; SameSite=Strict";
+        assert_eq!(
+            cookie_pair(header).as_deref(),
+            Some("dsh-auth-abc=v1.e30.signature")
+        );
+        // 非 dsh 会话 cookie 一律忽略，避免把别的 Set-Cookie 当会话用。
+        assert_eq!(cookie_pair("session=1; Path=/"), None);
+        assert_eq!(cookie_pair("dsh-auth-="), None);
+        assert_eq!(cookie_pair("dsh-auth-x"), None);
+    }
 
     #[test]
     fn normalizes_dsh_channel() {

@@ -150,7 +150,9 @@ fn current_base(st: &AppState) -> Option<String> {
     let recorded = st.server_url.lock().unwrap().clone();
     if let Some(url) = recorded.as_deref() {
         if state::health(url) {
-            return Some(url.to_string());
+            // 记录值可能是带 ?token= 的嵌入地址；原生客户端拼接 /api 路径
+            // 需要干净的基地址（token 只用于握手，cookie 单独携带）。
+            return Some(state::clean_url(url));
         }
     }
     let probe = format!("http://127.0.0.1:{port}");
@@ -185,7 +187,8 @@ fn ws_base(base: &str) -> String {
 }
 
 /// 向 Harness 发送一次 unary RPC（POST `/api/<method>`），返回解析后的响应 JSON。
-fn rpc_call(base: &str, method: &str, payload: Value) -> Result<Value, String> {
+/// DSH ≥ 0.1.2 的 /api 需要会话 cookie，握手成功后由调用方随 base 一并传入。
+fn rpc_call(base: &str, cookie: Option<&str>, method: &str, payload: Value) -> Result<Value, String> {
     let body = json!({
         "type": "client-request",
         "rpcId": next_rpc_id(),
@@ -193,8 +196,11 @@ fn rpc_call(base: &str, method: &str, payload: Value) -> Result<Value, String> {
         "payload": payload,
     });
     let url = format!("{base}/api/{method}");
-    let resp = ureq::post(&url)
-        .set("Content-Type", "application/json")
+    let mut request = ureq::post(&url).set("Content-Type", "application/json");
+    if let Some(cookie) = cookie {
+        request = request.set("Cookie", cookie);
+    }
+    let resp = request
         .send_string(&body.to_string())
         .map_err(|e| format!("{method}: {e}"))?;
     let text = resp.into_string().map_err(|e| e.to_string())?;
@@ -202,8 +208,8 @@ fn rpc_call(base: &str, method: &str, payload: Value) -> Result<Value, String> {
 }
 
 /// 拉取一次 `session.list` 并折叠为 `PetState`。
-fn poll_state(base: &str) -> Result<PetState, String> {
-    let v = rpc_call(base, "session.list", json!({}))?;
+fn poll_state(base: &str, cookie: Option<&str>) -> Result<PetState, String> {
+    let v = rpc_call(base, cookie, "session.list", json!({}))?;
     let result = v.get("result").ok_or("session.list: 缺少 result")?;
     if result.get("ok").and_then(|x| x.as_bool()) != Some(true) {
         return Err("session.list: ok=false".to_string());
@@ -421,7 +427,14 @@ fn session_title_goal(app: &AppHandle, session_id: &str) -> (Option<String>, Opt
 }
 
 /// 一条 WebSocket 下行流（mux 或 host）。断线后指数退避重连。
-fn spawn_stream(app: AppHandle, base: String, stop: Arc<AtomicBool>, mux: bool) {
+/// DSH ≥ 0.1.2 的流式握手校验会话 cookie，能带上时随握手头一起发。
+fn spawn_stream(
+    app: AppHandle,
+    base: String,
+    cookie: Option<String>,
+    stop: Arc<AtomicBool>,
+    mux: bool,
+) {
     std::thread::spawn(move || {
         let path = if mux {
             "/api/events.mux"
@@ -431,7 +444,28 @@ fn spawn_stream(app: AppHandle, base: String, stop: Arc<AtomicBool>, mux: bool) 
         let url = format!("{}{}", ws_base(&base), path);
         let mut backoff_ms: u64 = 500;
         while !stop.load(Ordering::SeqCst) {
-            match tungstenite::connect(url.as_str()) {
+            // 握手请求：有会话 cookie 就注入 Cookie 头（无 cookie 时保持原样，
+            // 兼容 0.1.1 及更早的无认证 dsh）。
+            let connect_result = match cookie.as_deref() {
+                Some(c) => {
+                    use tungstenite::client::IntoClientRequest;
+                    use tungstenite::http::HeaderValue;
+                    match url.as_str().into_client_request() {
+                        Ok(mut request) => match HeaderValue::from_str(c) {
+                            Ok(value) => {
+                                request
+                                    .headers_mut()
+                                    .insert(tungstenite::http::header::COOKIE, value);
+                                tungstenite::connect(request)
+                            }
+                            Err(_) => tungstenite::connect(url.as_str()),
+                        },
+                        Err(_) => tungstenite::connect(url.as_str()),
+                    }
+                }
+                None => tungstenite::connect(url.as_str()),
+            };
+            match connect_result {
                 Ok((mut socket, _)) => {
                     backoff_ms = 500;
                     while !stop.load(Ordering::SeqCst) {
@@ -475,6 +509,7 @@ fn orchestrator(app: AppHandle) {
             break;
         }
         let base = current_base(&st);
+        let cookie = st.auth_cookie.lock().unwrap().clone();
         drop(st);
 
         // 桌宠样式契约热更新：文件内容变化 → 广播并应用位置。
@@ -497,13 +532,25 @@ fn orchestrator(app: AppHandle) {
                     }
                     let mux_s = Arc::new(AtomicBool::new(false));
                     let host_s = Arc::new(AtomicBool::new(false));
-                    spawn_stream(app.clone(), u.clone(), Arc::clone(&mux_s), true);
-                    spawn_stream(app.clone(), u.clone(), Arc::clone(&host_s), false);
+                    spawn_stream(
+                        app.clone(),
+                        u.clone(),
+                        cookie.clone(),
+                        Arc::clone(&mux_s),
+                        true,
+                    );
+                    spawn_stream(
+                        app.clone(),
+                        u.clone(),
+                        cookie.clone(),
+                        Arc::clone(&host_s),
+                        false,
+                    );
                     mux_stop = Some(mux_s);
                     host_stop = Some(host_s);
                     last_url = Some(u.clone());
                 }
-                match poll_state(&u) {
+                match poll_state(&u, cookie.as_deref()) {
                     Ok(state) => {
                         // 完成检测：上一轮在跑的主会话全部结束（结束 / 被阻塞 /
                         // 从列表消失）→ 生成待查看通知，用户打开主界面后清除。
@@ -643,6 +690,7 @@ pub fn set_enabled(app: &AppHandle, enabled: bool) -> Result<bool, String> {
 /// 回答一条审批（允许一次 / 拒绝）。`rpc_id` 是 `approval/requested` 帧的 rpcId。
 fn respond_approval(
     base: &str,
+    cookie: Option<&str>,
     rpc_id: &str,
     session_id: &str,
     approval_id: &str,
@@ -666,8 +714,11 @@ fn respond_approval(
         }
     });
     let url = format!("{base}/api/respond");
-    let resp = ureq::post(&url)
-        .set("Content-Type", "application/json")
+    let mut request = ureq::post(&url).set("Content-Type", "application/json");
+    if let Some(cookie) = cookie {
+        request = request.set("Cookie", cookie);
+    }
+    let resp = request
         .send_string(&body.to_string())
         .map_err(|e| format!("respond: {e}"))?;
     let text = resp.into_string().map_err(|e| e.to_string())?;
@@ -695,7 +746,8 @@ pub fn pet_respond(
     outcome: String,
 ) -> Result<bool, String> {
     let base = current_base(&st).ok_or("服务器未运行")?;
-    respond_approval(&base, &rpc_id, &session_id, &approval_id, &outcome)
+    let cookie = st.auth_cookie.lock().unwrap().clone();
+    respond_approval(&base, cookie.as_deref(), &rpc_id, &session_id, &approval_id, &outcome)
 }
 
 #[tauri::command]
