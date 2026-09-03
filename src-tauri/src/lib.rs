@@ -6,6 +6,7 @@ mod pet_style;
 mod settings_plugin;
 mod state;
 mod update;
+mod webview_cookie;
 
 use std::sync::atomic::Ordering;
 

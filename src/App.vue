@@ -1220,6 +1220,16 @@ onMounted(async () => {
       server.value.url = e.payload;
     }),
   );
+  // DSH 会话 cookie 已捕获并注入 WebView2（Windows）：若内嵌 iframe 已因
+  // 未认证 401 白屏（跨站 iframe 拿不到 SameSite=Strict 握手 cookie），
+  // 重建一次即可恢复；注入先于本事件完成，正常时序下首屏直接成功。
+  unlisteners.push(
+    await listen<null>("dsh-auth-ready", () => {
+      if (view.value === "embed" && server.value.url) {
+        embedNonce.value += 1;
+      }
+    }),
+  );
   unlisteners.push(
     await listen<string>("install-stage", (e) => {
       installStage.value = e.payload;

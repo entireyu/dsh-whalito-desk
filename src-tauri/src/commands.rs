@@ -784,6 +784,23 @@ pub async fn check_latest_version(st: State<'_, AppState>) -> Result<Option<Stri
     .map_err(|e| e.to_string())?
 }
 
+/// 记录 dsh 会话 cookie（首个写入者生效，slot None→Some），随后把它注入
+/// 主窗口 WebView2 并通知前端（`dsh-auth-ready`）。
+///
+/// 注入是投递到主线程异步执行的，事件在投递之后发出：前端收到事件时注入
+/// 必已完成，若 iframe 已因 401 白屏，重建一次即可恢复。
+fn store_session_cookie(app: &AppHandle, slot: &Mutex<Option<String>>, cookie: String) {
+    {
+        let mut guard = slot.lock().unwrap();
+        if guard.is_some() {
+            return; // 并发重试只保留首个（cookie 名随 authority 固定，值等价）
+        }
+        *guard = Some(cookie.clone());
+    }
+    crate::webview_cookie::inject(app, &cookie);
+    let _ = app.emit("dsh-auth-ready", ());
+}
+
 pub fn start_server_impl(app: &AppHandle, shared: &Shared) -> Result<ServerStatus, String> {
     if shared.pid.lock().unwrap().is_some() {
         return Err("服务器已在运行".to_string());
@@ -925,12 +942,14 @@ pub fn start_server_impl(app: &AppHandle, shared: &Shared) -> Result<ServerStatu
                                 *slot = Some(u.clone());
                                 drop(slot);
                                 // DSH ≥ 0.1.2：URL 带进程 token → 立刻做一次信任
-                                // 握手，把会话 cookie 存下来供原生 HTTP/WS 客户端用
-                                // （内嵌 iframe 会在 WebView 里再独立握手一次，互不影响）。
+                                // 握手，把会话 cookie 存下来供原生 HTTP/WS 客户端用。
+                                // 内嵌 iframe 的独立握手在跨站 iframe 里拿不到
+                                // SameSite=Strict cookie，由 store_session_cookie
+                                // 一并注入 WebView2（见 webview_cookie.rs）。
                                 if auth_cookie.lock().unwrap().is_none() && u.contains("?token=")
                                 {
                                     if let Some(c) = state::capture_auth_cookie(&u) {
-                                        *auth_cookie.lock().unwrap() = Some(c);
+                                        store_session_cookie(&app, &auth_cookie, c);
                                     }
                                 }
                                 let _ = app.emit("server-url", &u);
@@ -1022,7 +1041,7 @@ pub fn start_server_impl(app: &AppHandle, shared: &Shared) -> Result<ServerStatu
             if let Some(u) = token_url {
                 if u.contains("?token=") {
                     if let Some(c) = state::capture_auth_cookie(&u) {
-                        *shared.auth_cookie.lock().unwrap() = Some(c);
+                        store_session_cookie(app, &shared.auth_cookie, c);
                     }
                 }
             }
@@ -1049,7 +1068,7 @@ pub fn start_server_impl(app: &AppHandle, shared: &Shared) -> Result<ServerStatu
         if let Some(u) = token_url.filter(|x| x.contains("?token=")) {
             for _ in 0..5 {
                 if let Some(c) = state::capture_auth_cookie(&u) {
-                    *shared.auth_cookie.lock().unwrap() = Some(c);
+                    store_session_cookie(app, &shared.auth_cookie, c);
                     break;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(200));

@@ -38,6 +38,9 @@ arboard = "3"
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.52"
+# WebView2 会话 cookie 注入（与 tauri/wry 同一版本，见 webview_cookie.rs）
+webview2-com = "0.38"
+windows-core = "0.61"
 
 # macOS：桌宠窗口需要透明（transparent）+ 无阴影（shadow），
 # 这两个 API 在 macOS 上由 tauri 的 macos-private-api feature 提供

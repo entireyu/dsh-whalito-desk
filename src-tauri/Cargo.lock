@@ -974,6 +974,8 @@ dependencies = [
  "tauri-plugin-single-instance",
  "tungstenite",
  "ureq",
+ "webview2-com",
+ "windows-core 0.61.2",
  "winreg 0.52.0",
  "zip",
 ]
