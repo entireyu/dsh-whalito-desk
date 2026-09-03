@@ -186,17 +186,22 @@ fn ws_base(base: &str) -> String {
     }
 }
 
-/// 向 Harness 发送一次 unary RPC（POST `/api/<method>`），返回解析后的响应 JSON。
+/// 向 Harness 发送一次 unary RPC（POST 指定的 `/api` 路径），返回解析后的响应 JSON。
 /// DSH ≥ 0.1.2 的 /api 需要会话 cookie，握手成功后由调用方随 base 一并传入。
-fn rpc_call(base: &str, cookie: Option<&str>, method: &str, payload: Value) -> Result<Value, String> {
+fn rpc_call(
+    base: &str,
+    cookie: Option<&str>,
+    method: &str,
+    url: &str,
+    payload: Value,
+) -> Result<Value, String> {
     let body = json!({
         "type": "client-request",
         "rpcId": next_rpc_id(),
         "method": method,
         "payload": payload,
     });
-    let url = format!("{base}/api/{method}");
-    let mut request = ureq::post(&url).set("Content-Type", "application/json");
+    let mut request = ureq::post(url).set("Content-Type", "application/json");
     if let Some(cookie) = cookie {
         request = request.set("Cookie", cookie);
     }
@@ -208,11 +213,29 @@ fn rpc_call(base: &str, cookie: Option<&str>, method: &str, payload: Value) -> R
 }
 
 /// 拉取一次 `session.list` 并折叠为 `PetState`。
+///
+/// DSH 0.1.2 把 unary RPC 改为斜杠方法名并引入 typert 网关：路径 /api/session/list、
+/// 信封 payload 必须是 `{args:{_request:{}}}`，且全程要求浏览器会话 cookie；
+/// 0.1.1 及更早用点号名（/api/session.list）+ 空 payload、无认证。有无会话
+/// cookie 恰好区分两者（0.1.2+ 必带 cookie，旧版没有认证概念），据此选择协议。
 fn poll_state(base: &str, cookie: Option<&str>) -> Result<PetState, String> {
-    let v = rpc_call(base, cookie, "session.list", json!({}))?;
-    let result = v.get("result").ok_or("session.list: 缺少 result")?;
+    let (method, url, payload) = if cookie.is_some() {
+        (
+            "session/list",
+            format!("{base}/api/session/list"),
+            json!({ "args": { "_request": {} } }),
+        )
+    } else {
+        (
+            "session.list",
+            format!("{base}/api/session.list"),
+            json!({}),
+        )
+    };
+    let v = rpc_call(base, cookie, method, &url, payload)?;
+    let result = v.get("result").ok_or(format!("{method}: 缺少 result"))?;
     if result.get("ok").and_then(|x| x.as_bool()) != Some(true) {
-        return Err("session.list: ok=false".to_string());
+        return Err(format!("{method}: ok=false"));
     }
     let items = result
         .get("value")

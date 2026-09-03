@@ -404,7 +404,14 @@ pub fn capture_auth_cookie(token_url: &str) -> Option<String> {
         .redirects(0)
         .timeout(std::time::Duration::from_millis(2000))
         .build();
-    let resp = agent.get(token_url).call().ok()?;
+    // 握手应答是 303 See Other：ureq 把非 2xx 状态归为 `Err(Status)`，但该
+    // 错误仍携带完整响应（含 Set-Cookie）。只取 Ok 会把 303 当成失败吞掉，
+    // cookie 永远抓不到——必须从 Status 错误里取出 Response 再读响应头。
+    let resp = match agent.get(token_url).call() {
+        Ok(resp) => resp,
+        Err(ureq::Error::Status(_, resp)) => resp,
+        Err(_) => return None,
+    };
     for value in resp.all("set-cookie") {
         if let Some(pair) = cookie_pair(value) {
             return Some(pair);
@@ -1293,6 +1300,30 @@ mod tests {
         assert_eq!(cookie_pair("session=1; Path=/"), None);
         assert_eq!(cookie_pair("dsh-auth-="), None);
         assert_eq!(cookie_pair("dsh-auth-x"), None);
+    }
+
+    #[test]
+    fn capture_auth_cookie_reads_303_handshake_cookie() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        // DSH ≥ 0.1.2 的信任握手回 303 See Other + Set-Cookie；ureq 把 303
+        // 归为 Err(Status)，回归验证必须从错误里取出 Response 读响应头。
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 2048];
+                let _ = stream.read(&mut buf);
+                let body = "HTTP/1.1 303 See Other\r\nlocation: /\r\nset-cookie: dsh-auth-t=v1.sig; Max-Age=2592000; Path=/; HttpOnly; SameSite=Strict\r\ncontent-length: 0\r\n\r\n";
+                let _ = stream.write_all(body.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+        let url = format!("http://{addr}/?token=abc");
+        assert_eq!(
+            capture_auth_cookie(&url).as_deref(),
+            Some("dsh-auth-t=v1.sig")
+        );
     }
 
     #[test]
