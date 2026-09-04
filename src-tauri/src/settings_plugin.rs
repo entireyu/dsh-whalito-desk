@@ -1454,7 +1454,15 @@ mod tests {
     /// bundles = [@deepseek-ai/dsh-base（内核）, dshmarket, my-plugin]，
     /// 后两个包带 `dsh.bundle.patch` 与补丁文件（多形态 id）。
     fn fixture_profile_with_bundles() -> PathBuf {
-        let base = std::env::temp_dir().join(format!("whalito-bundle-test-{}", std::process::id()));
+        // 该夹具被多个测试并发调用；用自增序号保证每个调用拿到唯一临时目录，
+        // 避免并发 remove_dir_all/create_dir_all 互相冲掉（CI 上 Windows 报 code 5 PermissionDenied）。
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        let base = std::env::temp_dir().join(format!(
+            "whalito-bundle-test-{}-{seq}",
+            std::process::id()
+        ));
         let _ = fs::remove_dir_all(&base);
         let profile = base.join("profiles").join("web");
         fs::create_dir_all(&profile).unwrap();
