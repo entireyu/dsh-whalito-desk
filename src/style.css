@@ -1025,3 +1025,42 @@ button.link {
   margin-top: 2px;
 }
 
+/* —— 管理后台双栏布局：主栏=运行日志，侧栏=市场/插件管理/关于 —— */
+.panel-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.45fr) minmax(0, 1fr);
+  grid-template-areas:
+    "logs market"
+    "logs plugins"
+    "logs about";
+  gap: 16px;
+  align-items: start;
+}
+.panel-area-logs {
+  grid-area: logs;
+}
+.panel-area-market {
+  grid-area: market;
+}
+.panel-area-plugins {
+  grid-area: plugins;
+}
+.panel-area-about {
+  grid-area: about;
+}
+/* 侧栏与主栏内的卡片不再需要额外外边距（grid gap 已接管）。 */
+.panel-grid > .card {
+  margin-bottom: 0;
+}
+@media (max-width: 900px) {
+  .panel-grid {
+    grid-template-columns: 1fr;
+    grid-template-areas:
+      "logs"
+      "market"
+      "plugins"
+      "about";
+  }
+}
+
+

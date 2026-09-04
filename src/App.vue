@@ -1935,8 +1935,10 @@ watch([installingDsh, whalitoUpdating, busy], maybeShowUpdateNotice);
         该服务器由外部启动；点击「停止服务器」将按端口定位并结束对应进程（需二次确认）。
       </p>
 
+      <!-- 双栏：主栏=运行日志；侧栏=插件市场 / 插件管理 / 关于（紧凑卡片） -->
+      <div class="panel-grid">
       <!-- 插件市场（dsh-market）：启动前自动预装，这里可手动检查 / 显式重装 -->
-      <div class="market-row">
+      <div class="market-row panel-area-market">
         <span class="hint">
           插件市场：
           <b>{{
@@ -1960,7 +1962,7 @@ watch([installingDsh, whalitoUpdating, busy], maybeShowUpdateNotice);
 
       <!-- 插件管理：禁用可能打断 DSH 启动的插件（bundle 层，含市场安装的）。
            禁用≠卸载：只写 disabled 覆盖行，重新启用即恢复；改动重启后生效。 -->
-      <section id="panel-plugins" class="card plugins">
+      <section id="panel-plugins" class="card plugins panel-area-plugins">
         <div class="plugins-head">
           <h2>插件管理</h2>
           <button
@@ -2077,7 +2079,7 @@ watch([installingDsh, whalitoUpdating, busy], maybeShowUpdateNotice);
         </div>
       </div>
 
-      <section class="card logs">
+      <section class="card logs panel-area-logs">
         <div class="logs-head">
           <h2>
             运行日志
@@ -2156,7 +2158,7 @@ watch([installingDsh, whalitoUpdating, busy], maybeShowUpdateNotice);
         </div>
       </section>
 
-      <section class="card about">
+      <section class="card about panel-area-about">
         <div class="about-head">
           <h2>关于</h2>
           <span class="about-version">
@@ -2193,6 +2195,8 @@ watch([installingDsh, whalitoUpdating, busy], maybeShowUpdateNotice);
         </div>
         <p class="hint">Node / Harness 安装、升级、切换与校验统一由「安装引导」自动检测处理；关闭窗口即隐藏到托盘。</p>
       </section>
+      </div>
+      <!-- /双栏 -->
     </template>
   </div>
 
