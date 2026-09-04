@@ -1082,6 +1082,70 @@ pub fn save_settings(app: &AppHandle, s: &Settings) -> Result<(), String> {
 /// 更新弹窗静默状态：各目标「暂不更新」到的时间戳（epoch 毫秒）。
 /// 独立于 Settings 持久化（save_settings 是整体替换、内嵌设置分区的字段集
 /// 不含这两项，放 Settings 里会被设置保存清掉）。
+/// 持久化的 dsh 会话 cookie（重进免重启的关键）：DSH 的签名密钥在用户家目录
+/// 常驻（跨进程不变），cookie 按「127.0.0.1:port」命名、30 天有效。鲸仔退出
+/// 后服务器若继续运行（「服务跟随鲸仔停止」关闭），下次启动把上次握手得到
+/// 的 cookie 直接注入 WebView2 即可恢复内嵌页，无需重启服务器/重打 token。
+#[derive(Serialize, Deserialize, Clone, Default)]
+pub struct SessionCookieFile {
+    /// cookie 对应的端口（authority 的一部分；换端口不匹配则不可复用）。
+    #[serde(default)]
+    pub port: u16,
+    /// `dsh-auth-<authority>=v1.<payload>.<sig>` 原样对。
+    #[serde(default)]
+    pub pair: String,
+    /// 捕获时间（epoch 秒，诊断用）。
+    #[serde(default)]
+    pub saved_at: i64,
+}
+
+fn session_cookie_path(app: &AppHandle) -> Result<PathBuf, String> {
+    let dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    Ok(dir.join("dsh_session_cookie.json"))
+}
+
+/// 写入会话 cookie（先写 .tmp 再改名，避免半截文件）。
+pub fn save_session_cookie_file(
+    app: &AppHandle,
+    port: u16,
+    pair: &str,
+) -> Result<(), String> {
+    let path = session_cookie_path(app)?;
+    let saved = SessionCookieFile {
+        port,
+        pair: pair.to_string(),
+        saved_at: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0),
+    };
+    write_session_cookie_file(&path, &saved)
+}
+
+/// 读取会话 cookie；缺失/损坏返回 None。
+pub fn load_session_cookie_file(app: &AppHandle) -> Option<SessionCookieFile> {
+    session_cookie_path(app)
+        .ok()
+        .and_then(|p| read_session_cookie_file(&p))
+}
+
+fn read_session_cookie_file(path: &Path) -> Option<SessionCookieFile> {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|t| serde_json::from_str::<SessionCookieFile>(&t).ok())
+        .filter(|s| !s.pair.is_empty())
+}
+
+fn write_session_cookie_file(path: &Path, s: &SessionCookieFile) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let json = serde_json::to_string_pretty(s).map_err(|e| e.to_string())?;
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, &json).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, path).map_err(|e| e.to_string())
+}
+
 #[derive(Serialize, Deserialize, Clone, Default)]
 pub struct UpdateSnooze {
     #[serde(default)]
@@ -1429,6 +1493,30 @@ mod tests {
             .into_iter()
             .find(|v| parse_semver(v).is_some_and(|t| t >= MIN_NODE_VERSION))
             .is_none());
+    }
+
+    #[test]
+    fn session_cookie_file_roundtrip_and_empty_filter() {
+        let path = std::env::temp_dir().join(format!("whalito-cookie-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("json.tmp"));
+        // 缺失 → None。
+        assert!(read_session_cookie_file(&path).is_none());
+        // 写入 → 读回一致。
+        let saved = SessionCookieFile {
+            port: 30080,
+            pair: "dsh-auth-x=v1.sig".to_string(),
+            saved_at: 123,
+        };
+        write_session_cookie_file(&path, &saved).unwrap();
+        let back = read_session_cookie_file(&path).expect("应能读回");
+        assert_eq!(back.port, 30080);
+        assert_eq!(back.pair, "dsh-auth-x=v1.sig");
+        // 空 pair（清空/损坏）→ None，调用方走重新握手/清理。
+        write_session_cookie_file(&path, &SessionCookieFile { port: 30080, pair: String::new(), saved_at: 0 }).unwrap();
+        assert!(read_session_cookie_file(&path).is_none());
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("json.tmp"));
     }
 
     #[test]

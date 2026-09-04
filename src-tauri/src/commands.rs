@@ -799,6 +799,137 @@ fn store_session_cookie(app: &AppHandle, slot: &Mutex<Option<String>>, cookie: S
     }
     crate::webview_cookie::inject(app, &cookie);
     let _ = app.emit("dsh-auth-ready", ());
+    // 持久化会话 cookie：退出后服务器若继续运行，下次启动直接注入即可恢复
+    // 内嵌页（免重启服务器；DSH 签名密钥跨进程常驻，cookie 30 天内有效）。
+    let port = app.state::<AppState>().settings.lock().unwrap().port;
+    let _ = state::save_session_cookie_file(app, port, &cookie);
+}
+
+// ============ 残留托管服务器自愈 ============
+// 场景：鲸仔退出（含重装覆盖）/ 崩溃时，DSH 子进程可能常驻端口（默认「服务
+// 跟随鲸仔停止」关）。新实例启动时端口被占 → 走「外部服务器」分支 → 拿不到
+// 旧进程 stdout 里的启动 token → 无法注入会话 cookie → 内嵌 iframe 401 白屏。
+// 若占用进程的命令行是本 build 的 launcher 前缀 + `web --port <port>`，判定为
+// 鲸仔自己上次遗留的托管进程 → 自动停掉并重新启动（新进程重新打印 token，
+// 完整握手恢复）；其他情况（真正的用户自建服务器）保持原样拒绝。
+
+/// 纯判定：命令行是否形如「鲸仔本 build 托管的 dsh」（大小写不敏感）。
+fn cmdline_looks_like_ours(cmdline: &str, prefix: &str, port: u16) -> bool {
+    let c = cmdline.to_lowercase();
+    let prefix = prefix.to_lowercase();
+    let port_marker = format!("web --port {port}");
+    c.contains(&prefix) && c.contains(&port_marker)
+}
+
+/// 读取进程命令行（尽力而为；读取失败保守返回 None = 不视为鲸仔进程）。
+fn process_command_line(pid: u32) -> Option<String> {
+    #[cfg(windows)]
+    {
+        let script = format!(
+            "Get-CimInstance Win32_Process -Filter \"ProcessId={pid}\" | Select-Object -ExpandProperty CommandLine"
+        );
+        let out = state::run_output("powershell", &["-NoProfile", "-Command", &script]).ok()?;
+        let trimmed = out.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let out = state::run_output("ps", &["-p", &pid.to_string(), "-o", "command="]).ok()?;
+        let trimmed = out.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    }
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    {
+        let _ = pid;
+        None
+    }
+}
+
+/// 认领并清理「鲸仔上次遗留的托管 dsh」：返回 true = 端口已空（原为空或已
+/// 清理）；false = 占用者非鲸仔托管进程或清理超时（调用方按外部服务器处理）。
+pub fn reclaim_stale_server_at(port: u16) -> Result<bool, String> {
+    let probe = format!("http://127.0.0.1:{port}");
+    if !state::health(&probe) {
+        return Ok(true);
+    }
+    let Some(pid) = state::find_pid_on_port(port) else {
+        return Ok(false);
+    };
+    let Some(cmdline) = process_command_line(pid) else {
+        return Ok(false);
+    };
+    let prefix = state::app_prefix_dir().to_string_lossy().to_string();
+    if !cmdline_looks_like_ours(&cmdline, &prefix, port) {
+        return Ok(false);
+    }
+    #[cfg(windows)]
+    let _ = state::run_output("taskkill", &["/PID", &pid.to_string(), "/T", "/F"]);
+    #[cfg(not(windows))]
+    {
+        let _ = std::process::Command::new("kill").arg(pid.to_string()).spawn();
+    }
+    // 强制杀后短等端口释放（最多约 2s）。
+    for _ in 0..10 {
+        if !state::health(&probe) {
+            return Ok(true);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    Ok(false)
+}
+
+/// 前端在「外部服务器」状态下询问：端口占用者是否是鲸仔遗留托管进程并已清理。
+/// （保留：start_server_impl 内部也会自动清理；此命令供面板手动触发时用。）
+#[tauri::command]
+pub async fn reclaim_stale_server(st: State<'_, AppState>) -> Result<bool, String> {
+    let port = st.settings.lock().unwrap().port;
+    tauri::async_runtime::spawn_blocking(move || reclaim_stale_server_at(port))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// 启动前接管既存服务器，返回恢复结果：
+/// - "resumed"：端口上有服务器且**上次握手保存的会话 cookie** 仍有效（同一
+///   端口 + DSH 常驻密钥）→ 已注入 WebView2（auth-ready 已发，前端重建 iframe
+///   即恢复），服务器**不重启**——退出重进的常规场景走这里，会话零中断；
+/// - "reclaimed"：端口上是鲸仔上次遗留的托管进程但无可用 cookie（升级前旧版
+///   未保存过）→ 已清理，端口已空，调用方走正常启动；
+/// - "external"：占用者不是鲸仔托管进程（真外部服务器）→ 保持原样；
+/// - "none"：端口空闲。
+#[tauri::command]
+pub async fn recover_managed_session(
+    app: AppHandle,
+    st: State<'_, AppState>,
+) -> Result<String, String> {
+    let port = st.settings.lock().unwrap().port;
+    tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
+        let probe = format!("http://127.0.0.1:{port}");
+        if !state::health(&probe) {
+            return Ok("none".to_string());
+        }
+        if let Some(saved) = state::load_session_cookie_file(&app) {
+            if saved.port == port && !saved.pair.is_empty() {
+                crate::webview_cookie::inject(&app, &saved.pair);
+                let _ = app.emit("dsh-auth-ready", ());
+                return Ok("resumed".to_string());
+            }
+        }
+        if reclaim_stale_server_at(port)? {
+            Ok("reclaimed".to_string())
+        } else {
+            Ok("external".to_string())
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 pub fn start_server_impl(app: &AppHandle, shared: &Shared) -> Result<ServerStatus, String> {
@@ -816,9 +947,12 @@ pub fn start_server_impl(app: &AppHandle, shared: &Shared) -> Result<ServerStatu
         (s.port, s.workspace_dir.clone())
     };
 
-    // 端口上可能已有外部启动的服务器，避免重复启动
+    // 端口上可能已有服务器：若占用者是鲸仔自己上次遗留的托管 dsh（重装/
+    // 异常退出后常驻），自动停掉并继续正常启动——否则新实例拿不到旧进程的
+    // 启动 token，内嵌 iframe 无法完成握手会 401 白屏。真正由用户/外部启动
+    // 的服务器（命令行不匹配）才按原有逻辑拒绝。
     let probe = format!("http://127.0.0.1:{port}");
-    if state::health(&probe) {
+    if state::health(&probe) && !reclaim_stale_server_at(port)? {
         return Err(format!(
             "端口 {port} 已有服务器在运行（可能由外部启动），无需重复启动"
         ));

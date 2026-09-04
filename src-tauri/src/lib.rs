@@ -131,6 +131,8 @@ pub fn run() {
             commands::stop_server,
             commands::restart_server,
             commands::server_status,
+            commands::reclaim_stale_server,
+            commands::recover_managed_session,
             commands::update_tray_state,
             commands::get_settings,
             commands::save_settings,

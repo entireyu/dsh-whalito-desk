@@ -1395,9 +1395,20 @@ async function runFlow() {
     }
   }
 
-  // 3. 确保服务器运行
+  // 3. 确保服务器运行。external 大概率是鲸仔上次退出留下的托管服务器
+  //    （默认「服务跟随鲸仔停止」关闭）：先尝试用持久化会话 cookie 无缝
+  //    接回（不重启服务器），无 cookie 时才清理残留并重新启动。
   stage.value = "server";
   await refreshStatus();
+  if (server.value.phase === "external") {
+    const rec = await recoverLeftoverServer();
+    if (rec === "reclaimed") {
+      pushLogRow("[系统] 检测到上次遗留的托管服务器（无可用会话），已清理，重新启动中…");
+      await refreshStatus();
+    } else if (rec === "resumed") {
+      pushLogRow("[系统] 已用上次会话接回运行中的服务器（未重启）");
+    }
+  }
   if (server.value.phase !== "running" && server.value.phase !== "external") {
     await startServer();
     if (server.value.phase !== "running") {
@@ -1449,6 +1460,17 @@ async function runWizard() {
     }
   }
   await refreshStatus();
+  // 外部服务器可能是鲸仔上次遗留：尝试无缝接回/清理，让结果卡状态与真实一致。
+  if (server.value.phase === "external") {
+    const rec = await recoverLeftoverServer();
+    if (rec === "reclaimed") {
+      pushLogRow("[系统] 检测到上次遗留的托管服务器（无可用会话），已清理");
+      await refreshStatus();
+    } else if (rec === "resumed") {
+      pushLogRow("[系统] 已用上次会话接回运行中的服务器（未重启）");
+      await refreshStatus();
+    }
+  }
   stage.value = "wizard-done";
 }
 
@@ -1488,6 +1510,27 @@ function goPanel() {
   view.value = "panel";
   flowManual.value = false;
   autoRestartFailed.value = false;
+}
+
+/**
+ * 外部服务器阶段尝试「无缝接回」：resumed = 用持久化会话 cookie 接回运行中
+ * 的服务器（未重启，auth-ready 事件已让 iframe 重建）；reclaimed = 清理了
+ * 鲸仔遗留托管进程（调用方随后走正常启动）；external = 真外部服务器；
+ * none = 端口空闲。
+ */
+async function recoverLeftoverServer(): Promise<
+  "resumed" | "reclaimed" | "external" | "none"
+> {
+  if (server.value.phase !== "external") return "none";
+  try {
+    const r = await invoke<string>("recover_managed_session");
+    if (r === "resumed" || r === "reclaimed" || r === "external" || r === "none") {
+      return r;
+    }
+    return "external";
+  } catch {
+    return "external";
+  }
 }
 
 onMounted(async () => {
