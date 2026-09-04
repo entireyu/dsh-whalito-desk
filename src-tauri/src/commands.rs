@@ -886,6 +886,18 @@ pub fn reclaim_stale_server_at(port: u16) -> Result<bool, String> {
     Ok(false)
 }
 
+/// 打开主窗口的 WebView2 开发者工具（测试构建排障用）。
+#[tauri::command]
+pub fn open_devtools(app: AppHandle) -> Result<(), String> {
+    use tauri::Manager;
+    if let Some(window) = app.get_webview_window("main") {
+        window.open_devtools();
+        Ok(())
+    } else {
+        Err("找不到主窗口".to_string())
+    }
+}
+
 /// 前端在「外部服务器」状态下询问：端口占用者是否是鲸仔遗留托管进程并已清理。
 /// （保留：start_server_impl 内部也会自动清理；此命令供面板手动触发时用。）
 #[tauri::command]

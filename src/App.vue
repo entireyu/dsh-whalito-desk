@@ -782,6 +782,12 @@ async function ctxTogglePet() {
   }
 }
 
+/** 打开开发工具（测试构建排障；面板/内嵌页通用）。 */
+function ctxDevtools() {
+  ctxMenu.value = null;
+  void invoke("open_devtools").catch(() => {});
+}
+
 // ============ 内嵌页面右键剪贴板操作 ============
 // 选区/光标在内嵌 iframe（跨源），剪贴板由父窗口经 Rust 代为读写：
 // 复制 → 通知 iframe 读选区文本上行 → 写入系统剪贴板；
@@ -811,10 +817,11 @@ async function ctxPaste() {
   }
 }
 
-/** 鲸仔面板自身右键不弹任何菜单（自定义菜单只服务内嵌 DSH 页面）。 */
+/** 鲸仔面板自身右键不再弹默认菜单：排障时直接打开开发者工具（测试构建）。 */
 function onPanelContextMenu(e: MouseEvent) {
   e.preventDefault();
   ctxMenu.value = null;
+  void invoke("open_devtools").catch(() => {});
 }
 
 // ============ 下载提示 ============
@@ -1976,10 +1983,10 @@ watch([installingDsh, whalitoUpdating, busy], maybeShowUpdateNotice);
               <button v-if="server.url" @click="openUrl">在浏览器打开</button>
               <button v-if="server.url" @click="copyServerUrl">复制地址</button>
             </div>
-            <p v-if="server.phase === 'external'" class="hint warn">
-              该服务器由外部启动；点击「停止服务器」将按端口定位并结束对应进程（需二次确认）。
-            </p>
           </div>
+          <p v-if="server.phase === 'external'" class="hint warn">
+            该服务器由外部启动；点击「停止服务器」将按端口定位并结束对应进程（需二次确认）。
+          </p>
 
           <section class="card logs panel-area-logs">
             <div class="logs-head">
@@ -2248,7 +2255,7 @@ watch([installingDsh, whalitoUpdating, busy], maybeShowUpdateNotice);
     </template>
   </div>
 
-  <!-- 内嵌 DSH 页面右键自定义菜单（复制/粘贴 ─ 刷新页面/重启服务器/显示隐藏桌宠） -->
+  <!-- 内嵌 DSH 页面右键自定义菜单（复制/粘贴 ─ 刷新页面/重启服务器/显示隐藏桌宠 ─ 开发者工具） -->
   <div
     v-if="ctxMenu"
     class="ctx-menu"
@@ -2261,6 +2268,8 @@ watch([installingDsh, whalitoUpdating, busy], maybeShowUpdateNotice);
     <button type="button" @click="ctxReload">刷新页面</button>
     <button type="button" @click="ctxRestart">重启服务器</button>
     <button type="button" @click="ctxTogglePet">显示 / 隐藏桌宠</button>
+    <div class="ctx-sep" />
+    <button type="button" @click="ctxDevtools">开发者工具</button>
   </div>
 
   <!-- 下载完成/复制成功提示（无路径时只显示纯文本提示，不出现文件夹按钮） -->

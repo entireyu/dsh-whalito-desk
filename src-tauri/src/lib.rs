@@ -133,6 +133,7 @@ pub fn run() {
             commands::server_status,
             commands::reclaim_stale_server,
             commands::recover_managed_session,
+            commands::open_devtools,
             commands::update_tray_state,
             commands::get_settings,
             commands::save_settings,
