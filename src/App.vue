@@ -2,7 +2,6 @@
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { emit, listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import { dshOrigin, isWhalitoMessage, postToDsh, toPlain } from "./whalitoBridge";
 import LoadingScreen from "./LoadingScreen.vue";
 import type {
@@ -402,11 +401,6 @@ async function copyServerUrl() {
     .catch(() => false);
   if (ok) showToast("已复制服务器地址", "");
   else postWhalitoError("复制服务器地址失败");
-}
-
-/** 隐藏到托盘：close() 触发 CloseRequested，非退出状态下被拦截为 hide。 */
-function hideToTray() {
-  getCurrentWindow().close();
 }
 
 async function wrap<T>(task: string, fn: () => Promise<T>): Promise<T | undefined> {
@@ -2198,7 +2192,6 @@ watch([installingDsh, whalitoUpdating, busy], maybeShowUpdateNotice);
               >
                 GitHub 项目主页
               </button>
-              <button class="ghost" @click="hideToTray">隐藏到托盘</button>
             </div>
             <p class="hint">Node / Harness 安装、升级、切换与校验统一由「安装引导」自动检测处理；关闭窗口即隐藏到托盘。</p>
           </section>
