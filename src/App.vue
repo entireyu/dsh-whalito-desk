@@ -1991,7 +1991,7 @@ watch([installingDsh, whalitoUpdating, busy], maybeShowUpdateNotice);
                 </template>
               </div>
               <div v-if="server.url && server.phase !== 'stopped'" class="tool-main">
-                <button class="primary tool-open" @click="openEmbedded">应用内打开</button>
+                <button class="primary tool-open" @click="openEmbedded">进入 DeepSeek Harness</button>
                 <div class="tool-drop" @click.stop>
                   <button
                     class="ghost tool-drop-toggle"
