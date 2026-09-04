@@ -1964,11 +1964,10 @@ watch([installingDsh, whalitoUpdating, busy], maybeShowUpdateNotice);
       <p v-if="notice" class="banner notice">{{ notice }}</p>
       <p v-if="busy" class="banner busy">⏳ {{ busy }}</p>
 
-      <!-- 整页两列 3:2。左列(3)：第一行再分两小列=三状态卡 | 操作按钮，第二行=运行日志。
+      <!-- 整页两列 3:2。左列(3)：三状态卡（一行三张）在上 → 操作按钮在下 → 运行日志；
            右列(2)：单列=插件管理 / 插件市场 / 关于。 -->
       <div class="panel-grid">
         <div class="panel-left">
-          <div class="panel-left-row">
             <div class="panel-top-status">
               <div
                 v-for="item in overviewItems"
@@ -2006,7 +2005,6 @@ watch([installingDsh, whalitoUpdating, busy], maybeShowUpdateNotice);
                 </div>
               </div>
             </div>
-          </div>
           <p v-if="server.phase === 'external'" class="hint warn">
             该服务器由外部启动；点击「停止服务器」将按端口定位并结束对应进程（需二次确认）。
           </p>
@@ -2117,6 +2115,7 @@ watch([installingDsh, whalitoUpdating, busy], maybeShowUpdateNotice);
                   <span v-if="p.builtin" class="badge-soft">内置</span>
                 </span>
                 <span class="hint plugin-desc">{{ p.description }}</span>
+                <span v-if="p.builtin" class="plugin-note">鲸仔入口，不提供禁用</span>
               </div>
               <div class="plugin-actions">
                 <span v-if="p.installable && !p.installed" class="hint">未安装</span>
@@ -2139,7 +2138,6 @@ watch([installingDsh, whalitoUpdating, busy], maybeShowUpdateNotice);
                 >
                   {{ pluginsBusy === p.id ? "处理中…" : p.disabled ? "启用" : "禁用" }}
                 </button>
-                <span v-else class="hint">鲸仔入口，不提供禁用</span>
               </div>
             </div>
           </section>

@@ -1040,7 +1040,7 @@ button.link {
 }
 
 /* —— 管理后台布局：整页两列 3:2 —— 用 flex + 显式宽度（确定性，不会相互叠加）
-   左列(3)：第一行再分两小列（三状态卡 | 操作按钮 竖排），第二行=运行日志；
+   左列(3)：三状态卡（一行三张）在上 → 操作按钮在下 → 运行日志；
    右列(2)：单列=插件管理 / 插件市场 / 关于。 */
 .panel-grid {
   display: flex;
@@ -1056,24 +1056,15 @@ button.link {
   flex-direction: column;
   gap: 16px;
 }
-.panel-left-row {
-  display: flex;
-  flex-wrap: nowrap;
-  align-items: flex-start;
-  gap: 16px;
-  min-width: 0;
-}
+/* 三张状态卡：左列内一行三张（窄屏退回堆叠） */
 .panel-top-status {
-  flex: 0 0 52%;
-  max-width: 52%;
-  min-width: 0;
   display: grid;
+  grid-template-columns: repeat(3, 1fr);
   gap: 12px;
-  align-content: start;
+  min-width: 0;
 }
-/* 操作按钮竖排、满宽，与状态卡并排观感一致 */
-.panel-left-row .server-tools {
-  flex: 1;
+/* 操作按钮竖排、满宽（在状态卡下方） */
+.panel-left > .server-tools {
   min-width: 0;
   display: flex;
   flex-wrap: nowrap; /* 覆盖基础 .server-tools 的 wrap，避免列+换行叠成多列 */
@@ -1156,20 +1147,20 @@ button.link {
     flex-wrap: wrap;
   }
   .panel-left,
-  .panel-left-row {
-    flex-basis: 100%;
-    max-width: 100%;
-  }
-  .panel-left-row {
-    flex-wrap: wrap;
-  }
-  .panel-top-status {
-    flex-basis: 100%;
-    max-width: 100%;
-  }
   .panel-right {
     flex-basis: 100%;
+    max-width: 100%;
+  }
+  .panel-top-status {
+    grid-template-columns: 1fr;
   }
 }
+/* 内置插件说明行（「鲸仔入口，不提供禁用」独立一行展示）。 */
+.plugin-note {
+  font-size: 11px;
+  opacity: 0.65;
+  color: var(--muted);
+}
+
 
 
