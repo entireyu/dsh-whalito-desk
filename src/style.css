@@ -1039,47 +1039,113 @@ button.link {
   margin-top: 2px;
 }
 
-/* —— 管理后台布局：整页两列 3:2 ——
+/* —— 管理后台布局：整页两列 3:2 —— 用 flex + 显式宽度（确定性，不会相互叠加）
    左列(3)：第一行再分两小列（三状态卡 | 操作按钮 竖排），第二行=运行日志；
    右列(2)：单列=插件管理 / 插件市场 / 关于。 */
 .panel-grid {
-  display: grid;
-  grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: flex-start;
   gap: 16px;
-  align-items: start;
 }
 .panel-left {
-  display: grid;
+  flex: 0 0 60%;
+  max-width: 60%;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.panel-left-row {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: flex-start;
   gap: 16px;
   min-width: 0;
 }
-.panel-left-row {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 16px;
-  align-items: start;
-}
 .panel-top-status {
+  flex: 0 0 52%;
+  max-width: 52%;
+  min-width: 0;
   display: grid;
   gap: 12px;
   align-content: start;
 }
 /* 操作按钮竖排、满宽，与状态卡并排观感一致 */
 .panel-left-row .server-tools {
+  flex: 1;
+  min-width: 0;
   display: flex;
-  flex-wrap: nowrap; /* 关键：覆盖基础 .server-tools 的 wrap，避免列+换行叠成多列 */
+  flex-wrap: nowrap; /* 覆盖基础 .server-tools 的 wrap，避免列+换行叠成多列 */
   flex-direction: column;
   align-items: stretch;
   gap: 8px;
 }
-.panel-left-row .server-tools > button {
+/* 第一行：停止/重启（或启动）并排 */
+.server-tools .tool-row {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+}
+.server-tools .tool-row > button {
+  flex: 1;
+}
+/* 第二行：应用内打开（大而高） + 「⋯」下拉 并排 */
+.server-tools .tool-main {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+}
+.tool-open {
+  flex: 1;
+  min-height: 46px;
+  font-size: 14px;
+}
+.tool-drop {
+  position: relative;
+}
+.tool-drop-toggle {
+  width: 48px;
+  min-height: 46px;
+  font-size: 18px;
+  line-height: 1;
+}
+.tool-menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 4px);
+  min-width: 160px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  z-index: 50;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+}
+.tool-menu > button {
+  text-align: left;
   width: 100%;
+  background: none;
+  border: none;
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.tool-menu > button:hover {
+  background: rgba(127, 127, 127, 0.15);
 }
 .panel-right {
+  flex: 1;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 16px;
-  min-width: 0;
 }
 /* 卡片自身不再叠加外边距（容器 gap 已接管）。 */
 .panel-grid .card {
@@ -1087,10 +1153,22 @@ button.link {
 }
 @media (max-width: 900px) {
   .panel-grid {
-    grid-template-columns: 1fr;
+    flex-wrap: wrap;
+  }
+  .panel-left,
+  .panel-left-row {
+    flex-basis: 100%;
+    max-width: 100%;
   }
   .panel-left-row {
-    grid-template-columns: 1fr;
+    flex-wrap: wrap;
+  }
+  .panel-top-status {
+    flex-basis: 100%;
+    max-width: 100%;
+  }
+  .panel-right {
+    flex-basis: 100%;
   }
 }
 

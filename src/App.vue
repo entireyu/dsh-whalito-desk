@@ -182,6 +182,12 @@ const error = ref<string>("");
 const notice = ref<string>("");
 const showSettings = ref(false);
 const confirmingStop = ref(false);
+/** 服务器工具「⋯」下拉（在浏览器打开 / 复制地址）是否展开。 */
+const toolsDrop = ref(false);
+/** 点击工具区域以外时收起下拉。 */
+function toolsDropDocClick() {
+  toolsDrop.value = false;
+}
 const autoRestartCount = ref(0);
 const MAX_AUTO_RESTART = 3;
 /** 连续自动重启失败（面板错误横幅可给出「更新鲸仔 / 插件管理」动作）。 */
@@ -1662,6 +1668,8 @@ onMounted(async () => {
   // 鲸仔面板右键不弹菜单；iframe 内的右键事件不会冒泡到这里，
   // 所以只影响面板自身。
   window.addEventListener("contextmenu", onPanelContextMenu);
+  // 点击工具区域以外时收起「⋯」下拉（toggle/菜单项已在模板里 @click.stop）。
+  document.addEventListener("click", toolsDropDocClick);
 
   await Promise.all([loadSettings(), refreshLogs()]);
   // 状态快照（插件 / PATH）加载完成后补推一次，避免分区首屏 hello 拿到空数据
@@ -1691,6 +1699,7 @@ onMounted(async () => {
 onUnmounted(() => {
   window.removeEventListener("message", handleWhalitoMessage);
   window.removeEventListener("contextmenu", onPanelContextMenu);
+  document.removeEventListener("click", toolsDropDocClick);
   if (toastTimer !== undefined) window.clearTimeout(toastTimer);
   unlisteners.forEach((u) => u());
   if (pollTimer) window.clearInterval(pollTimer);
@@ -1972,16 +1981,30 @@ watch([installingDsh, whalitoUpdating, busy], maybeShowUpdateNotice);
               </div>
             </div>
             <div class="server-tools">
-              <button v-if="server.phase === 'stopped'" class="primary" @click="startServer">启动服务器</button>
-              <button v-else-if="server.phase === 'error'" class="primary" @click="startServer">重新启动</button>
-              <button v-else class="danger" @click="stopServer">
-                {{ server.phase === "external" && confirmingStop ? "再次点击确认停止" : "停止服务器" }}
-              </button>
-              <button v-if="server.phase === 'external' && confirmingStop" class="ghost" @click="confirmingStop = false">取消</button>
-              <button v-if="server.phase === 'running' || server.phase === 'external'" class="ghost" @click="restartServer">重启服务器</button>
-              <button v-if="server.url" class="primary" @click="openEmbedded">应用内打开</button>
-              <button v-if="server.url" @click="openUrl">在浏览器打开</button>
-              <button v-if="server.url" @click="copyServerUrl">复制地址</button>
+              <div class="tool-row">
+                <button v-if="server.phase === 'stopped'" class="primary" @click="startServer">启动服务器</button>
+                <template v-else>
+                  <button class="danger" @click="stopServer">
+                    {{ server.phase === "external" && confirmingStop ? "再次点击确认停止" : "停止服务器" }}
+                  </button>
+                  <button v-if="server.phase === 'running' || server.phase === 'external'" class="ghost" @click="restartServer">重启服务器</button>
+                  <button v-if="server.phase === 'external' && confirmingStop" class="ghost" @click="confirmingStop = false">取消</button>
+                </template>
+              </div>
+              <div v-if="server.url && server.phase !== 'stopped'" class="tool-main">
+                <button class="primary tool-open" @click="openEmbedded">应用内打开</button>
+                <div class="tool-drop" @click.stop>
+                  <button
+                    class="ghost tool-drop-toggle"
+                    @click="toolsDrop = !toolsDrop"
+                    :title="'在浏览器打开 / 复制地址'"
+                  >⋯</button>
+                  <div v-if="toolsDrop" class="tool-menu">
+                    <button type="button" @click.stop="openUrl">在浏览器打开</button>
+                    <button type="button" @click.stop="copyServerUrl">复制地址</button>
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
           <p v-if="server.phase === 'external'" class="hint warn">
