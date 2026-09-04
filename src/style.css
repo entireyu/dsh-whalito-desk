@@ -1039,10 +1039,23 @@ button.link {
   margin-top: 2px;
 }
 
-/* —— 管理后台布局：顶部（状态卡+操作/插件并排）+ 双栏（日志主栏 / 市场·关于侧栏） —— */
-.panel-top {
+/* —— 管理后台布局：整页两列 3:2 ——
+   左列(3)：第一行再分两小列（三状态卡 | 操作按钮 竖排），第二行=运行日志；
+   右列(2)：单列=插件管理 / 插件市场 / 关于。 */
+.panel-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+  gap: 16px;
+  align-items: start;
+}
+.panel-left {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+}
+.panel-left-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
   gap: 16px;
   align-items: start;
 }
@@ -1051,54 +1064,32 @@ button.link {
   gap: 12px;
   align-content: start;
 }
-.panel-top-actions {
-  display: grid;
-  gap: 12px;
-  align-content: start;
-}
-/* 操作按钮竖排、满宽，和三张状态卡并排观感一致 */
-.panel-top-actions .server-tools {
+/* 操作按钮竖排、满宽，与状态卡并排观感一致 */
+.panel-left-row .server-tools {
   display: flex;
   flex-direction: column;
   align-items: stretch;
   gap: 8px;
 }
-.panel-top-actions .server-tools > button {
+.panel-left-row .server-tools > button {
   width: 100%;
 }
-
-.panel-grid {
-  display: grid;
-  grid-template-columns: minmax(0, 1.45fr) minmax(0, 1fr);
-  grid-template-areas:
-    "logs market"
-    "logs about";
+.panel-right {
+  display: flex;
+  flex-direction: column;
   gap: 16px;
-  align-items: start;
+  min-width: 0;
 }
-.panel-area-logs {
-  grid-area: logs;
-}
-.panel-area-market {
-  grid-area: market;
-}
-.panel-area-about {
-  grid-area: about;
-}
-/* 侧栏与主栏内的卡片不再需要额外外边距（grid gap 已接管）。 */
-.panel-grid > .card {
+/* 卡片自身不再叠加外边距（容器 gap 已接管）。 */
+.panel-grid .card {
   margin-bottom: 0;
 }
 @media (max-width: 900px) {
-  .panel-top,
   .panel-grid {
     grid-template-columns: 1fr;
   }
-  .panel-grid {
-    grid-template-areas:
-      "logs"
-      "market"
-      "about";
+  .panel-left-row {
+    grid-template-columns: 1fr;
   }
 }
 

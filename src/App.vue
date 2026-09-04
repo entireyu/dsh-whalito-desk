@@ -1924,37 +1924,145 @@ watch([installingDsh, whalitoUpdating, busy], maybeShowUpdateNotice);
         </div>
       </header>
 
-      <!-- 顶部：左侧三张状态卡（竖排），右侧操作按钮 + 插件管理（竖排、并排显示） -->
-      <div class="panel-top">
-        <div class="panel-top-status">
-          <div
-            v-for="item in overviewItems"
-            :key="item.label"
-            class="overview-item"
-            :class="item.state"
-          >
-            <span class="overview-title">{{ item.label }}</span>
-            <span class="overview-value">{{ item.text }}</span>
-          </div>
-        </div>
-        <div class="panel-top-actions">
-          <!-- 服务器操作工具栏（竖排） -->
-          <div class="server-tools">
-            <button v-if="server.phase === 'stopped'" class="primary" @click="startServer">启动服务器</button>
-            <button v-else-if="server.phase === 'error'" class="primary" @click="startServer">重新启动</button>
-            <button v-else class="danger" @click="stopServer">
-              {{ server.phase === "external" && confirmingStop ? "再次点击确认停止" : "停止服务器" }}
-            </button>
-            <button v-if="server.phase === 'external' && confirmingStop" class="ghost" @click="confirmingStop = false">取消</button>
-            <button v-if="server.phase === 'running' || server.phase === 'external'" class="ghost" @click="restartServer">重启服务器</button>
-            <button v-if="server.url" class="primary" @click="openEmbedded">应用内打开</button>
-            <button v-if="server.url" @click="openUrl">在浏览器打开</button>
-            <button v-if="server.url" @click="copyServerUrl">复制地址</button>
-          </div>
-          <p v-if="server.phase === 'external'" class="hint warn">
-            该服务器由外部启动；点击「停止服务器」将按端口定位并结束对应进程（需二次确认）。
-          </p>
+      <div v-if="installingNode || installingDsh" class="progress-track">
+        <div class="progress-bar"></div>
+        <p v-if="dshUpdateMessage" class="hint">{{ dshUpdateMessage }}</p>
+      </div>
 
+      <p v-if="error" class="banner error">{{ error }}</p>
+      <!-- 连续自动重启失败：给出「更新鲸仔 / 插件管理」两个恢复动作 -->
+      <div v-if="autoRestartFailed" class="row fix-row">
+        <button
+          v-if="whalitoUpdateAvailable"
+          class="primary small"
+          :disabled="whalitoUpdating"
+          @click="updateWhalitoNow"
+        >
+          {{ whalitoUpdating ? "正在更新…" : `尝试更新鲸仔到 v${whalitoVer?.latest}` }}
+        </button>
+        <button v-else class="ghost small" :disabled="whalitoUpdating" @click="checkWhalitoUpdateUi()">
+          检查鲸仔更新
+        </button>
+        <button class="ghost small" @click="focusPluginsCard">管理插件（禁用异常插件）</button>
+      </div>
+      <p v-if="notice" class="banner notice">{{ notice }}</p>
+      <p v-if="busy" class="banner busy">⏳ {{ busy }}</p>
+
+      <!-- 整页两列 3:2。左列(3)：第一行再分两小列=三状态卡 | 操作按钮，第二行=运行日志。
+           右列(2)：单列=插件管理 / 插件市场 / 关于。 -->
+      <div class="panel-grid">
+        <div class="panel-left">
+          <div class="panel-left-row">
+            <div class="panel-top-status">
+              <div
+                v-for="item in overviewItems"
+                :key="item.label"
+                class="overview-item"
+                :class="item.state"
+              >
+                <span class="overview-title">{{ item.label }}</span>
+                <span class="overview-value">{{ item.text }}</span>
+              </div>
+            </div>
+            <div class="server-tools">
+              <button v-if="server.phase === 'stopped'" class="primary" @click="startServer">启动服务器</button>
+              <button v-else-if="server.phase === 'error'" class="primary" @click="startServer">重新启动</button>
+              <button v-else class="danger" @click="stopServer">
+                {{ server.phase === "external" && confirmingStop ? "再次点击确认停止" : "停止服务器" }}
+              </button>
+              <button v-if="server.phase === 'external' && confirmingStop" class="ghost" @click="confirmingStop = false">取消</button>
+              <button v-if="server.phase === 'running' || server.phase === 'external'" class="ghost" @click="restartServer">重启服务器</button>
+              <button v-if="server.url" class="primary" @click="openEmbedded">应用内打开</button>
+              <button v-if="server.url" @click="openUrl">在浏览器打开</button>
+              <button v-if="server.url" @click="copyServerUrl">复制地址</button>
+            </div>
+            <p v-if="server.phase === 'external'" class="hint warn">
+              该服务器由外部启动；点击「停止服务器」将按端口定位并结束对应进程（需二次确认）。
+            </p>
+          </div>
+
+          <section class="card logs panel-area-logs">
+            <div class="logs-head">
+              <h2>
+                运行日志
+                <span v-if="logs.length" class="logs-count">
+                  （共 {{ logs.length }} 条<span v-if="logHidden > 0">，显示后 {{ logs.length - logHidden }} 条</span>）
+                </span>
+              </h2>
+              <div class="row logs-tools">
+                <label class="check small-check">
+                  <input v-model="logAutoScroll" type="checkbox" />
+                  <span>自动滚动</span>
+                </label>
+                <button
+                  class="ghost small"
+                  :disabled="!haveErrors"
+                  @click="copyErrors"
+                  title="把全部错误日志复制到剪贴板"
+                >
+                  复制错误
+                </button>
+                <button
+                  class="ghost small"
+                  :disabled="!haveErrors"
+                  @click="copyErrorsToAi"
+                  title="带版本信息的排障提示词，可直接粘贴给 AI"
+                >
+                  复制到 AI
+                </button>
+                <button class="ghost small" @click="refreshLogs">刷新</button>
+                <button class="ghost small" @click="clearLogs">清空</button>
+              </div>
+            </div>
+            <div ref="logBox" class="logbox">
+              <div v-if="logs.length === 0" class="empty">暂无日志</div>
+              <template v-else>
+                <button
+                  v-if="logHidden > 0"
+                  class="ghost small logs-earlier"
+                  @click="loadEarlierLogs"
+                >
+                  加载更早（还有 {{ logHidden }} 条）
+                </button>
+                <div
+                  v-for="l in logVisible()"
+                  :key="l.id"
+                  class="log-row"
+                  :class="[`kind-${l.kind}`, { expanded: expandedLogIds.has(l.id) }]"
+                >
+                  <span class="log-badge">{{ l.kind === "system" ? "系统" : l.kind === "error" ? "错误" : "信息" }}</span>
+                  <span class="log-time">{{ fmtTime(l.ts) }}</span>
+                  <span class="log-text">{{ l.text }}</span>
+                  <span class="log-actions" @click.stop>
+                    <button
+                      v-if="l.kind === 'error'"
+                      type="button"
+                      class="ghost small"
+                      @click="copyLogRow(l, false)"
+                      title="复制该行内容"
+                    >
+                      复制
+                    </button>
+                    <button
+                      v-if="l.kind === 'error'"
+                      type="button"
+                      class="ghost small"
+                      @click="copyLogRow(l, true)"
+                      title="该行 + 版本信息，生成排障提示词"
+                    >
+                      复制到 AI
+                    </button>
+                    <button type="button" class="log-toggle" @click="toggleLogExpanded(l.id)">
+                      {{ expandedLogIds.has(l.id) ? "收起" : "展开" }}
+                    </button>
+                  </span>
+                </div>
+              </template>
+            </div>
+          </section>
+        </div>
+
+        <div class="panel-right">
           <!-- 插件管理：禁用可能打断 DSH 启动的插件（bundle 层，含市场安装的）。
                禁用≠卸载：只写 disabled 覆盖行，重新启用即恢复；改动重启后生效。 -->
           <section id="panel-plugins" class="card plugins">
@@ -2005,56 +2113,68 @@ watch([installingDsh, whalitoUpdating, busy], maybeShowUpdateNotice);
               </div>
             </div>
           </section>
+
+          <!-- 插件市场（dsh-market）：启动前自动预装，这里可手动检查 / 显式重装 -->
+          <div class="market-row">
+            <span class="hint">
+              插件市场：
+              <b>{{
+                marketInstalled
+                  ? "已就绪（DSH 设置页可见）"
+                  : marketOnce
+                    ? "已卸载（鲸仔不会自动装回）"
+                    : "未安装（首次启动时自动安装）"
+              }}</b>
+            </span>
+            <button class="ghost small" :disabled="!!busy" @click="syncMarket(false)">检查 / 安装</button>
+            <button
+              v-if="marketOnce && !marketInstalled"
+              class="ghost small"
+              :disabled="!!busy"
+              @click="syncMarket(true)"
+            >
+              重新安装
+            </button>
+          </div>
+
+          <section class="card about panel-area-about">
+            <div class="about-head">
+              <h2>关于</h2>
+              <span class="about-version">
+                鲸仔 Whalito v{{ whalitoVer?.current ?? "—" }}{{ whalitoVer?.testBuild ? "（测试版）" : "" }}
+                <span v-if="whalitoUpdateAvailable" class="badge-soft">
+                  可更新至 v{{ whalitoVer?.latest }}
+                </span>
+              </span>
+            </div>
+            <div class="about-versions">
+              <span class="hint">DeepSeek Harness：v{{ env?.dshVersion ?? "未安装" }}</span>
+              <span class="hint">通道：{{ settings?.dshChannel === "next" ? "预发布（next）" : "稳定（latest）" }}</span>
+            </div>
+            <div class="row">
+              <button class="primary" @click="runWizard">重新运行安装引导</button>
+              <button class="ghost" :disabled="whalitoUpdating" @click="checkWhalitoUpdateUi()">
+                检查鲸仔更新
+              </button>
+              <button
+                v-if="whalitoUpdateAvailable"
+                class="primary"
+                :disabled="whalitoUpdating"
+                @click="updateWhalitoNow"
+              >
+                更新鲸仔到 v{{ whalitoVer?.latest }}
+              </button>
+              <button
+                class="ghost"
+                @click="invoke('open_url', { url: 'https://github.com/entireyu/dsh-whalito-desk' }).catch(() => {})"
+              >
+                GitHub 项目主页
+              </button>
+              <button class="ghost" @click="hideToTray">隐藏到托盘</button>
+            </div>
+            <p class="hint">Node / Harness 安装、升级、切换与校验统一由「安装引导」自动检测处理；关闭窗口即隐藏到托盘。</p>
+          </section>
         </div>
-      </div>
-
-      <div v-if="installingNode || installingDsh" class="progress-track">
-        <div class="progress-bar"></div>
-        <p v-if="dshUpdateMessage" class="hint">{{ dshUpdateMessage }}</p>
-      </div>
-
-      <p v-if="error" class="banner error">{{ error }}</p>
-      <!-- 连续自动重启失败：给出「更新鲸仔 / 插件管理」两个恢复动作 -->
-      <div v-if="autoRestartFailed" class="row fix-row">
-        <button
-          v-if="whalitoUpdateAvailable"
-          class="primary small"
-          :disabled="whalitoUpdating"
-          @click="updateWhalitoNow"
-        >
-          {{ whalitoUpdating ? "正在更新…" : `尝试更新鲸仔到 v${whalitoVer?.latest}` }}
-        </button>
-        <button v-else class="ghost small" :disabled="whalitoUpdating" @click="checkWhalitoUpdateUi()">
-          检查鲸仔更新
-        </button>
-        <button class="ghost small" @click="focusPluginsCard">管理插件（禁用异常插件）</button>
-      </div>
-      <p v-if="notice" class="banner notice">{{ notice }}</p>
-      <p v-if="busy" class="banner busy">⏳ {{ busy }}</p>
-
-      <!-- 双栏：主栏=运行日志；侧栏=插件市场 / 关于 -->
-      <div class="panel-grid">
-      <!-- 插件市场（dsh-market）：启动前自动预装，这里可手动检查 / 显式重装 -->
-      <div class="market-row panel-area-market">
-        <span class="hint">
-          插件市场：
-          <b>{{
-            marketInstalled
-              ? "已就绪（DSH 设置页可见）"
-              : marketOnce
-                ? "已卸载（鲸仔不会自动装回）"
-                : "未安装（首次启动时自动安装）"
-          }}</b>
-        </span>
-        <button class="ghost small" :disabled="!!busy" @click="syncMarket(false)">检查 / 安装</button>
-        <button
-          v-if="marketOnce && !marketInstalled"
-          class="ghost small"
-          :disabled="!!busy"
-          @click="syncMarket(true)"
-        >
-          重新安装
-        </button>
       </div>
 
       <div v-if="showSettings && settings" class="modal-backdrop" @click.self="showSettings = false">
@@ -2125,129 +2245,6 @@ watch([installingDsh, whalitoUpdating, busy], maybeShowUpdateNotice);
         </div>
       </div>
 
-      <section class="card logs panel-area-logs">
-        <div class="logs-head">
-          <h2>
-            运行日志
-            <span v-if="logs.length" class="logs-count">
-              （共 {{ logs.length }} 条<span v-if="logHidden > 0">，显示后 {{ logs.length - logHidden }} 条</span>）
-            </span>
-          </h2>
-          <div class="row logs-tools">
-            <label class="check small-check">
-              <input v-model="logAutoScroll" type="checkbox" />
-              <span>自动滚动</span>
-            </label>
-            <button
-              class="ghost small"
-              :disabled="!haveErrors"
-              @click="copyErrors"
-              title="把全部错误日志复制到剪贴板"
-            >
-              复制错误
-            </button>
-            <button
-              class="ghost small"
-              :disabled="!haveErrors"
-              @click="copyErrorsToAi"
-              title="带版本信息的排障提示词，可直接粘贴给 AI"
-            >
-              复制到 AI
-            </button>
-            <button class="ghost small" @click="refreshLogs">刷新</button>
-            <button class="ghost small" @click="clearLogs">清空</button>
-          </div>
-        </div>
-        <div ref="logBox" class="logbox">
-          <div v-if="logs.length === 0" class="empty">暂无日志</div>
-          <template v-else>
-            <button
-              v-if="logHidden > 0"
-              class="ghost small logs-earlier"
-              @click="loadEarlierLogs"
-            >
-              加载更早（还有 {{ logHidden }} 条）
-            </button>
-            <div
-              v-for="l in logVisible()"
-              :key="l.id"
-              class="log-row"
-              :class="[`kind-${l.kind}`, { expanded: expandedLogIds.has(l.id) }]"
-            >
-              <span class="log-badge">{{ l.kind === "system" ? "系统" : l.kind === "error" ? "错误" : "信息" }}</span>
-              <span class="log-time">{{ fmtTime(l.ts) }}</span>
-              <span class="log-text">{{ l.text }}</span>
-              <span class="log-actions" @click.stop>
-                <button
-                  v-if="l.kind === 'error'"
-                  type="button"
-                  class="ghost small"
-                  @click="copyLogRow(l, false)"
-                  title="复制该行内容"
-                >
-                  复制
-                </button>
-                <button
-                  v-if="l.kind === 'error'"
-                  type="button"
-                  class="ghost small"
-                  @click="copyLogRow(l, true)"
-                  title="该行 + 版本信息，生成排障提示词"
-                >
-                  复制到 AI
-                </button>
-                <button
-                  type="button"
-                  class="log-toggle"
-                  @click="toggleLogExpanded(l.id)"
-                >
-                  {{ expandedLogIds.has(l.id) ? "收起" : "展开" }}
-                </button>
-              </span>
-            </div>
-          </template>
-        </div>
-      </section>
-
-      <section class="card about panel-area-about">
-        <div class="about-head">
-          <h2>关于</h2>
-          <span class="about-version">
-            鲸仔 Whalito v{{ whalitoVer?.current ?? "—" }}{{ whalitoVer?.testBuild ? "（测试版）" : "" }}
-            <span v-if="whalitoUpdateAvailable" class="badge-soft">
-              可更新至 v{{ whalitoVer?.latest }}
-            </span>
-          </span>
-        </div>
-        <div class="about-versions">
-          <span class="hint">DeepSeek Harness：v{{ env?.dshVersion ?? "未安装" }}</span>
-          <span class="hint">通道：{{ settings?.dshChannel === "next" ? "预发布（next）" : "稳定（latest）" }}</span>
-        </div>
-        <div class="row">
-          <button class="primary" @click="runWizard">重新运行安装引导</button>
-          <button class="ghost" :disabled="whalitoUpdating" @click="checkWhalitoUpdateUi()">
-            检查鲸仔更新
-          </button>
-          <button
-            v-if="whalitoUpdateAvailable"
-            class="primary"
-            :disabled="whalitoUpdating"
-            @click="updateWhalitoNow"
-          >
-            更新鲸仔到 v{{ whalitoVer?.latest }}
-          </button>
-          <button
-            class="ghost"
-            @click="invoke('open_url', { url: 'https://github.com/entireyu/dsh-whalito-desk' }).catch(() => {})"
-          >
-            GitHub 项目主页
-          </button>
-          <button class="ghost" @click="hideToTray">隐藏到托盘</button>
-        </div>
-        <p class="hint">Node / Harness 安装、升级、切换与校验统一由「安装引导」自动检测处理；关闭窗口即隐藏到托盘。</p>
-      </section>
-      </div>
-      <!-- /双栏 -->
     </template>
   </div>
 
