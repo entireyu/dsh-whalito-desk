@@ -1067,6 +1067,7 @@ button.link {
 /* 操作按钮竖排、满宽，与状态卡并排观感一致 */
 .panel-left-row .server-tools {
   display: flex;
+  flex-wrap: nowrap; /* 关键：覆盖基础 .server-tools 的 wrap，避免列+换行叠成多列 */
   flex-direction: column;
   align-items: stretch;
   gap: 8px;
