@@ -301,6 +301,23 @@ pub fn installed_bundles(profile: &Path) -> Vec<String> {
 /// - R1：PKGS 同名包已在 bundle 层**真正激活**（bundles 列出且包声明 dsh.bundle，
 ///   由调用方算出 active_bundles）→ 跳过 insert，避免同一插件两层各加载一次。
 fn managed_block(disabled_ids: &[&str], active_bundles: &[String]) -> String {
+    // 常量形态：extras = DISABLEABLE_IDS 中不属于 PKGS 的（dsh-market 等）。
+    let const_extras: Vec<String> = DISABLEABLE_IDS
+        .iter()
+        .filter(|id| !PKGS.iter().any(|p| p.id == **id))
+        .map(|s| s.to_string())
+        .collect();
+    managed_block_with(disabled_ids, active_bundles, &const_extras)
+}
+
+/// managed_block 的完整形态：extra_ids = 可禁用的「非 PKGS」loader 条目 id
+/// 池（常量 + bundle 层动态条目），被禁用时只输出覆盖行（行由包自身的
+/// 补丁/insert 创建，无需鲸仔 insert）。
+fn managed_block_with(
+    disabled_ids: &[&str],
+    active_bundles: &[String],
+    extra_ids: &[String],
+) -> String {
     let mut lines = String::from(MARK_BEGIN);
     for pkg in PKGS {
         if active_bundles.iter().any(|b| b == pkg.name) {
@@ -315,10 +332,11 @@ fn managed_block(disabled_ids: &[&str], active_bundles: &[String]) -> String {
             lines.push_str(&format!("\n- id: {}\n  disabled: true", pkg.id));
         }
     }
-    // 不在 PKGS 中的可禁用插件（dsh-market：bundle 层行由包自身 insert，覆盖即可）。
-    for extra in DISABLEABLE_IDS {
-        if disabled_ids.contains(extra) && !PKGS.iter().any(|p| p.id == *extra) {
-            lines.push_str(&format!("\n- id: {}\n  disabled: true", extra));
+    // 不在 PKGS 中的可禁用插件（dsh-market、用户经插件市场装的 bundle 层
+    // 插件）：loader 行由包自身 insert，标记块只输出覆盖行。
+    for extra in extra_ids {
+        if disabled_ids.contains(&extra.as_str()) {
+            lines.push_str(&format!("\n- id: {extra}\n  disabled: true"));
         }
     }
     lines.push('\n');
@@ -349,9 +367,124 @@ fn active_bundles(profile: &Path) -> Vec<String> {
         .collect()
 }
 
+/// 内核 bundle（DSH 本体组成，绝不提供禁用/卸载入口）：
+/// `@deepseek-ai/*` 官方 scope 的 bundle 都是运行时/基础 UI（dsh-base、
+/// dsh-web-app 等）；插件市场装的第三方插件一般无 scope 或属作者 scope。
+fn is_core_bundle_name(name: &str) -> bool {
+    name.starts_with("@deepseek-ai/")
+}
+
+/// 从 bundle 包的补丁文件提取 loader 条目 id（禁用覆盖行按 id 定向）。
+/// 兼容两种行形态：顶层 `- id: x`（列表条目）与 `- insert:` 的子行
+/// （缩进 2/4 空格）。更深层的配置字段（如 entry 属性里嵌套的 `id:`）
+/// 不会以列表项缩进出现，忽略；带引号的 id 一并剥壳。
+fn patch_loader_ids(patch_text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for raw in patch_text.lines() {
+        let t = raw.trim();
+        if t.starts_with("- id:") && raw.len() - raw.trim_start().len() <= 4 {
+            let v = t["- id:".len()..]
+                .trim()
+                .trim_matches('\'')
+                .trim_matches('"')
+                .to_string();
+            if !v.is_empty() && !out.contains(&v) {
+                out.push(v);
+            }
+        }
+    }
+    out
+}
+
+/// 一个可禁用的 bundle 层 loader 条目（id → 所属包）。
+struct BundleDisableEntry {
+    id: String,
+    pkg: String,
+    description: String,
+}
+
+/// 枚举 bundle 层可禁用条目：profile `dsh.profile.bundles` 中已激活、非内核
+/// （@deepseek-ai/*）、非鲸仔托管 PKGS 的包，从其补丁文件（package.json
+/// `dsh.bundle.patch`，默认 ./cordis.patch.yml）提取 loader 条目 id。
+/// 这类包正是「插件市场安装、可能在 loader 层打断 DSH 启动」的插件
+/// （如 dshmarket 1.29.2 事件）；禁用 = 标记块写 disabled 覆盖行，重启生效。
+fn bundle_disable_entries(profile: &Path) -> Vec<BundleDisableEntry> {
+    let mut out = Vec::new();
+    for bundle in active_bundles(profile) {
+        if is_core_bundle_name(&bundle) || PKGS.iter().any(|p| p.name == bundle) {
+            continue;
+        }
+        let pkg_dir = profile.join("node_modules").join(&bundle);
+        let Ok(text) = fs::read_to_string(pkg_dir.join("package.json")) else {
+            continue;
+        };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        let description = v
+            .get("description")
+            .and_then(|d| d.as_str())
+            .unwrap_or("")
+            .to_string();
+        let patch_rel = v
+            .get("dsh")
+            .and_then(|d| d.get("bundle"))
+            .and_then(|b| b.get("patch"))
+            .and_then(|p| p.as_str())
+            .unwrap_or("cordis.patch.yml")
+            .trim_start_matches("./");
+        let Ok(patch) = fs::read_to_string(pkg_dir.join(patch_rel)) else {
+            continue;
+        };
+        for id in patch_loader_ids(&patch) {
+            out.push(BundleDisableEntry {
+                id,
+                pkg: bundle.clone(),
+                description: description.clone(),
+            });
+        }
+    }
+    out
+}
+
+/// 可禁用的全部 id 池：鲸仔托管 PKGS（whalito-settings 除外，见 toggle 门禁）
+/// + 常量可禁用（dsh-market 未装时的兼容保留）+ bundle 层可禁用条目。
+/// 供禁用解析/权限判定使用；内容随 profile 现状动态变化。
+fn disableable_id_pool(profile: &Path) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for p in PKGS {
+        if !out.contains(&p.id.to_string()) {
+            out.push(p.id.to_string());
+        }
+    }
+    for extra in DISABLEABLE_IDS {
+        if !out.iter().any(|x| x == extra) {
+            out.push(extra.to_string());
+        }
+    }
+    for entry in bundle_disable_entries(profile) {
+        if !out.contains(&entry.id) {
+            out.push(entry.id);
+        }
+    }
+    out
+}
+
 /// 解析现有 patch 中的禁用条目（顶格 `- id: <可禁用 id>` + 下一行 `disabled: true`）。
 /// 只认鲸仔可管理的 id；insert 块里的缩进 `- id:` 行不会误判。
+/// 常量形态：allowed = PKGS 全部 id + DISABLEABLE_IDS（兼容旧调用与测试）。
 fn parse_disabled_ids(existing: &str) -> Vec<String> {
+    let mut allowed: Vec<String> = PKGS.iter().map(|p| p.id.to_string()).collect();
+    for extra in DISABLEABLE_IDS {
+        if !allowed.iter().any(|x| x == extra) {
+            allowed.push(extra.to_string());
+        }
+    }
+    parse_disabled_ids_with(existing, &allowed)
+}
+
+/// 完整形态：allowed = 动态可禁用 id 池（含 bundle 层条目，见 disableable_id_pool）。
+fn parse_disabled_ids_with(existing: &str, allowed: &[String]) -> Vec<String> {
     let lines: Vec<&str> = existing.lines().collect();
     let mut out: Vec<String> = Vec::new();
     let mut i = 0;
@@ -361,8 +494,7 @@ fn parse_disabled_ids(existing: &str) -> Vec<String> {
             // 顶格条目（insert 块的子行带缩进，不匹配）。
             let raw = t["- id:".len()..].trim();
             let id_val = raw.trim_matches('\'').trim_matches('"').to_string();
-            let manageable = DISABLEABLE_IDS.contains(&id_val.as_str())
-                || PKGS.iter().any(|p| p.id == id_val);
+            let manageable = allowed.iter().any(|x| x == &id_val);
             if manageable && lines[i + 1].trim().starts_with("disabled: true") {
                 if !out.contains(&id_val) {
                     out.push(id_val);
@@ -473,15 +605,42 @@ pub fn upsert_marker_block(existing: &str) -> String {
 /// bundle 层 → 标记块跳过 insert）；forced_disabled = 调用方显式指定的禁用
 /// 列表（toggle 命令用；同步流程传空、从现有文件解析）。
 pub fn upsert_marker_block_with(existing: &str, bundles: &[String], forced_disabled: &[String]) -> String {
+    let mut allowed: Vec<String> = PKGS.iter().map(|p| p.id.to_string()).collect();
+    for extra in DISABLEABLE_IDS {
+        if !allowed.iter().any(|x| x == extra) {
+            allowed.push(extra.to_string());
+        }
+    }
+    upsert_marker_block_with_allowed(existing, bundles, forced_disabled, &allowed)
+}
+
+/// upsert 的完整形态（动态 id 池）：allowed = 禁用解析允许的 id 池（PKGS
+/// 全部 id + 常量可禁用 + bundle 层动态条目，见 disableable_id_pool）。
+/// 重建时 PKGS 走 insert/覆盖分支，非 PKGS id 只输出 disabled 覆盖行。
+pub fn upsert_marker_block_with_allowed(
+    existing: &str,
+    bundles: &[String],
+    forced_disabled: &[String],
+    allowed: &[String],
+) -> String {
     let normalized = existing.replace(LEGACY_MARK_BEGIN, MARK_BEGIN).replace(LEGACY_MARK_END, MARK_END);
     let existing = &normalized;
-    let mut disabled_ids = parse_disabled_ids(existing);
+    let mut disabled_ids = parse_disabled_ids_with(existing, allowed);
     for id in forced_disabled {
         if !disabled_ids.contains(id) {
             disabled_ids.push(id.clone());
         }
     }
-    let block = managed_block(&disabled_ids.iter().map(|s| s.as_str()).collect::<Vec<_>>(), bundles);
+    let extra_ids: Vec<String> = allowed
+        .iter()
+        .filter(|id| !PKGS.iter().any(|p| p.id == id.as_str()))
+        .cloned()
+        .collect();
+    let block = managed_block_with(
+        &disabled_ids.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+        bundles,
+        &extra_ids,
+    );
     replace_marker_block(existing, &block)
 }
 
@@ -609,7 +768,10 @@ pub fn sync_patch_layer(profile: &Path) -> Result<bool, String> {
         fs::write(&path, block).map_err(|e| format!("写入 cordis.patch.yml 失败：{e}"))?;
         return Ok(true);
     };
-    let updated = upsert_marker_block_with(&current, &bundles, &[]);
+    let updated = {
+        let allowed = disableable_id_pool(profile);
+        upsert_marker_block_with_allowed(&current, &bundles, &[], &allowed)
+    };
     if updated == current {
         return Ok(false);
     }
@@ -682,12 +844,16 @@ pub struct PluginEntryView {
     pub disabled: bool,
 }
 
-/// 内置插件列表 + 当前状态（供「鲸仔设置」分区与面板展示）。
+/// 内置/可管理插件列表 + 当前状态（供「鲸仔设置」分区与面板展示）。
+/// 覆盖：鲸仔托管 PKGS（whalito-settings 内置不可禁、dsh-webui-plus）+ 
+/// dshmarket（已装走 bundle 层条目，未装给安装入口）+ 插件市场安装的
+/// 其他 bundle 层插件（描述取各自 package.json）。
 #[tauri::command]
 pub fn plugins_status(_app: AppHandle) -> Vec<PluginEntryView> {
     let profile = profile_dir();
     let patch = fs::read_to_string(profile.join("cordis.patch.yml")).unwrap_or_default();
-    let disabled = parse_disabled_ids(&patch);
+    let allowed = disableable_id_pool(&profile);
+    let disabled = parse_disabled_ids_with(&patch, &allowed);
     let bundles = installed_bundles(&profile);
     let is_disabled = |id: &str| disabled.iter().any(|d| d == id);
     let mut out: Vec<PluginEntryView> = Vec::new();
@@ -706,30 +872,54 @@ pub fn plugins_status(_app: AppHandle) -> Vec<PluginEntryView> {
             disabled: !builtin && is_disabled(pkg.id),
         });
     }
-    // dshmarket：bundle 层插件（鲸仔预装，用户可卸载；未装时提供安装入口）。
+    // dsh-market 未安装时保留安装入口行（已装时走 bundle 层条目，见下）。
     let market_installed = bundles.iter().any(|b| b == crate::market::MARKET_PKG);
-    out.push(PluginEntryView {
-        id: "dsh-market".to_string(),
-        name: crate::market::MARKET_PKG.to_string(),
-        description: "插件市场：在 DSH 设置页内浏览、搜索并安装社区插件（含热挂载与自重启）。".to_string(),
-        builtin: false,
-        installable: true,
-        installed: market_installed,
-        disabled: is_disabled("dsh-market"),
-    });
+    if !market_installed {
+        out.push(PluginEntryView {
+            id: "dsh-market".to_string(),
+            name: crate::market::MARKET_PKG.to_string(),
+            description: "插件市场：在 DSH 设置页内浏览、搜索并安装社区插件（含热挂载与自重启）。".to_string(),
+            builtin: false,
+            installable: true,
+            installed: false,
+            disabled: false,
+        });
+    }
+    // bundle 层可禁用条目（含已装的 dsh-market 与市场装的其他插件）。
+    for entry in bundle_disable_entries(&profile) {
+        let entry_id = entry.id.clone();
+        let description = if entry.description.is_empty() {
+            format!("插件市场安装的 bundle 插件（{}）。", entry.pkg)
+        } else if entry.id == "dsh-market" {
+            // dsh-market 有既定中文描述，覆盖英文包描述。
+            "插件市场：在 DSH 设置页内浏览、搜索并安装社区插件（含热挂载与自重启）。".to_string()
+        } else {
+            entry.description
+        };
+        out.push(PluginEntryView {
+            id: entry.id,
+            name: entry.pkg,
+            description,
+            builtin: false,
+            installable: false,
+            installed: true,
+            disabled: is_disabled(&entry_id),
+        });
+    }
     out
 }
 
-/// 切换内置插件禁用状态（写 cordis.patch.yml 标记块内的 disabled 覆盖行）。
-/// 只允许 DISABLEABLE_IDS；**禁用 ≠ 卸载**——不删除任何插件文件，
-/// 重新启用即恢复加载（bundle 层插件保持已安装）。改动需重启 DSH 生效。
-/// 返回新的状态列表。
+/// 切换插件禁用状态（写 cordis.patch.yml 标记块内的 disabled 覆盖行）。
+/// 允许集 = PKGS（whalito-settings 内置除外）+ 常量 + bundle 层动态条目；
+/// **禁用 ≠ 卸载**——不删除任何插件文件，重新启用即恢复加载
+/// （bundle 层插件保持已安装）。改动需重启 DSH 生效。返回新的状态列表。
 #[tauri::command]
 pub fn toggle_plugin(app: AppHandle, id: String, enabled: bool) -> Result<Vec<PluginEntryView>, String> {
-    if !DISABLEABLE_IDS.contains(&id.as_str()) {
-        return Err(format!("插件 {id} 不允许禁用（内置组件或未知插件）"));
-    }
     let profile = profile_dir();
+    let allowed = disableable_id_pool(&profile);
+    if id == "whalito-settings" || !allowed.iter().any(|x| x == &id) {
+        return Err(format!("插件 {id} 不允许禁用（内置组件、DSH 内核或未知插件）"));
+    }
     let path = profile.join("cordis.patch.yml");
     let current = if path.exists() {
         fs::read_to_string(&path).map_err(|e| format!("读取 cordis.patch.yml 失败：{e}"))?
@@ -737,16 +927,21 @@ pub fn toggle_plugin(app: AppHandle, id: String, enabled: bool) -> Result<Vec<Pl
         String::new()
     };
     let bundles = active_bundles(&profile);
-    let mut disabled = parse_disabled_ids(&current);
+    let mut disabled = parse_disabled_ids_with(&current, &allowed);
     if enabled {
         disabled.retain(|d| d != &id);
     } else if !disabled.contains(&id) {
         disabled.push(id.clone());
     }
     // 用权威禁用列表重建标记块（不走 upsert 的重新解析，保证启用后旧行被移除）。
-    let block = managed_block(
+    let block = managed_block_with(
         &disabled.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
         &bundles,
+        &allowed
+            .iter()
+            .filter(|x| !PKGS.iter().any(|p| p.id == x.as_str()))
+            .cloned()
+            .collect::<Vec<_>>(),
     );
     let updated = replace_marker_block(&current, &block);
     if updated != current {
@@ -756,7 +951,7 @@ pub fn toggle_plugin(app: AppHandle, id: String, enabled: bool) -> Result<Vec<Pl
     crate::state::push_log(
         &st.logs,
         &format!(
-            "[系统] 已{}内置插件 {id}（重启服务器后生效）",
+            "[系统] 已{}插件 {id}（重启服务器后生效）",
             if enabled { "启用" } else { "禁用" }
         ),
     );
@@ -1251,5 +1446,173 @@ mod tests {
         fs::create_dir_all(&prefix).unwrap();
         assert!(backup_dsh_config_at(&home, &prefix, &backup_root).unwrap().is_none());
         let _ = fs::remove_dir_all(&base);
+    }
+
+    // —— bundle 层插件禁用（0.5.2 插件管理）——
+
+    /// 构造含 bundle 层插件的 profile 临时目录：
+    /// bundles = [@deepseek-ai/dsh-base（内核）, dshmarket, my-plugin]，
+    /// 后两个包带 `dsh.bundle.patch` 与补丁文件（多形态 id）。
+    fn fixture_profile_with_bundles() -> PathBuf {
+        let base = std::env::temp_dir().join(format!("whalito-bundle-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let profile = base.join("profiles").join("web");
+        fs::create_dir_all(&profile).unwrap();
+        fs::write(
+            profile.join("package.json"),
+            r#"{"dsh":{"profile":{"bundles":["@deepseek-ai/dsh-base","dshmarket","my-plugin"]}}}"#,
+        )
+        .unwrap();
+        let pkgs: &[(&str, &str, &str)] = &[
+            ("dshmarket", "插件市场", "- insert:\n    - id: dsh-market\n      name: 'dshmarket'\n"),
+            (
+                "my-plugin",
+                "我的增强插件",
+                "- id: my-fancy\n  name: 'my-plugin'\n- insert:\n    - id: 'my-extra'\n      name: 'my-plugin'\n",
+            ),
+        ];
+        for (name, desc, patch) in pkgs {
+            let dir = profile.join("node_modules").join(name);
+            fs::create_dir_all(&dir).unwrap();
+            let manifest = format!(
+                r#"{{"name":"{name}","description":"{desc}","dsh":{{"bundle":{{"patch":"./cordis.patch.yml"}}}}}}"#
+            );
+            fs::write(dir.join("package.json"), manifest).unwrap();
+            fs::write(dir.join("cordis.patch.yml"), patch).unwrap();
+        }
+        // 内核 bundle（@deepseek-ai scope）：即使列在 bundles 也不可禁用。
+        let core_dir = profile.join("node_modules").join("@deepseek-ai").join("dsh-base");
+        fs::create_dir_all(&core_dir).unwrap();
+        fs::write(
+            core_dir.join("package.json"),
+            r#"{"name":"@deepseek-ai/dsh-base","dsh":{"bundle":{"patch":"./cordis.patch.yml"}}}"#,
+        )
+        .unwrap();
+        fs::write(
+            core_dir.join("cordis.patch.yml"),
+            "- insert:\n    - id: dsh-base\n      name: '@deepseek-ai/dsh-base'\n",
+        )
+        .unwrap();
+        profile
+    }
+
+    #[test]
+    fn patch_loader_ids_extracts_top_level_and_insert_children() {
+        let text = "\
+- insert:
+    - id: top-insert
+      name: x
+      config:
+        - id: deep-nested
+- id: 'quoted-top'
+  disabled: true
+- insert:
+    - id: second
+    - id: third
+";
+        let ids = patch_loader_ids(text);
+        assert!(ids.contains(&"top-insert".to_string()));
+        assert!(ids.contains(&"quoted-top".to_string()));
+        assert!(ids.contains(&"second".to_string()));
+        assert!(ids.contains(&"third".to_string()));
+        assert!(
+            !ids.contains(&"deep-nested".to_string()),
+            "深层配置字段（缩进 8）不是 loader 条目，不应纳入：{ids:?}"
+        );
+    }
+
+    #[test]
+    fn bundle_disable_entries_skips_core_and_matches_descriptions() {
+        let profile = fixture_profile_with_bundles();
+        let entries = bundle_disable_entries(&profile);
+        let _ = fs::remove_dir_all(profile.parent().unwrap().parent().unwrap());
+        // dsh-base（内核）不在其中；dshmarket 与 my-plugin 的 loader id 都在。
+        let ids: Vec<&str> = entries.iter().map(|e| e.id.as_str()).collect();
+        assert!(!ids.contains(&"dsh-base"));
+        assert!(ids.contains(&"dsh-market"));
+        assert!(ids.contains(&"my-fancy"));
+        assert!(ids.contains(&"my-extra"));
+        let market = entries.iter().find(|e| e.id == "dsh-market").unwrap();
+        assert_eq!(market.pkg, "dshmarket");
+        assert_eq!(market.description, "插件市场");
+        let fancy = entries.iter().find(|e| e.id == "my-fancy").unwrap();
+        assert_eq!(fancy.description, "我的增强插件");
+    }
+
+    #[test]
+    fn disableable_pool_covers_pkgs_constants_and_bundles() {
+        let profile = fixture_profile_with_bundles();
+        let pool = disableable_id_pool(&profile);
+        let _ = fs::remove_dir_all(profile.parent().unwrap().parent().unwrap());
+        for expect in ["whalito-settings", "dsh-webui-plus", "dsh-market", "my-fancy", "my-extra"] {
+            assert!(pool.iter().any(|x| x == expect), "池应包含 {expect}：{pool:?}");
+        }
+        assert!(!pool.iter().any(|x| x == "dsh-base"), "内核 bundle 不得入池");
+    }
+
+    #[test]
+    fn managed_block_with_only_emits_disabled_extra_overrides() {
+        let extras = vec!["my-fancy".to_string(), "my-extra".to_string()];
+        let block = managed_block_with(&["my-fancy", "dsh-webui-plus"], &[], &extras);
+        assert!(block.contains("- id: my-fancy\n  disabled: true"), "{block}");
+        assert!(
+            !block.contains("id: my-extra"),
+            "未禁用的 extra 不输出覆盖行：{block}"
+        );
+        assert!(
+            block.contains("- id: dsh-webui-plus\n  disabled: true"),
+            "PKGS 分支仍需输出覆盖行：{block}"
+        );
+    }
+
+    #[test]
+    fn sync_keeps_bundle_disabled_override_with_dynamic_pool() {
+        let profile = fixture_profile_with_bundles();
+        let base = profile.parent().unwrap().parent().unwrap();
+        let existing = format!(
+            "{MARK_BEGIN}\n- insert:\n    - id: whalito-settings\n      name: '@entireyu/whalito-dsh-settings'\n\
+             - id: my-fancy\n  disabled: true\n{MARK_END}\n"
+        );
+        let allowed = disableable_id_pool(&profile);
+        let bundles = active_bundles(&profile);
+        let out = upsert_marker_block_with_allowed(&existing, &bundles, &[], &allowed);
+        assert!(
+            out.contains("- id: my-fancy\n  disabled: true"),
+            "同步重建后 bundle 插件禁用覆盖行必须保留：{out}"
+        );
+        // 幂等：再跑一次结果不变。
+        let again = upsert_marker_block_with_allowed(&out, &bundles, &[], &allowed);
+        assert_eq!(out, again);
+        // 未知 id 的 disabled 行（不属于池）应被当作外部内容丢弃（既有语义）。
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn upsert_with_forced_disabled_roundtrip_for_bundle_id() {
+        let existing = format!(
+            "{MARK_BEGIN}\n- insert:\n    - id: whalito-settings\n      name: '@entireyu/whalito-dsh-settings'\n{MARK_END}\n"
+        );
+        let allowed = vec![
+            "whalito-settings".to_string(),
+            "dsh-webui-plus".to_string(),
+            "my-extra".to_string(),
+        ];
+        // 禁用 → 覆盖行出现。
+        let disabled_once =
+            upsert_marker_block_with_allowed(&existing, &[], &["my-extra".to_string()], &allowed);
+        assert!(disabled_once.contains("- id: my-extra\n  disabled: true"), "{disabled_once}");
+        // 模拟同步（无 forced）：从现有文件解析并保留，幂等。
+        let kept = upsert_marker_block_with_allowed(&disabled_once, &[], &[], &allowed);
+        assert!(kept.contains("- id: my-extra\n  disabled: true"), "{kept}");
+        assert_eq!(kept, disabled_once);
+        // 启用 = 用权威禁用列表（去掉该 id）重建标记块（toggle 的路径）。
+        let extra_ids: Vec<String> = allowed
+            .iter()
+            .filter(|id| !PKGS.iter().any(|p| p.id == id.as_str()))
+            .cloned()
+            .collect();
+        let block = managed_block_with(&["whalito-settings"], &[], &extra_ids);
+        let re_enabled = replace_marker_block(&disabled_once, &block);
+        assert!(!re_enabled.contains("my-extra"), "启用后覆盖行应移除：{re_enabled}");
     }
 }

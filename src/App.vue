@@ -80,7 +80,103 @@ const serverBusy = ref("");
 const settings = ref<Settings | null>(null);
 // 当前平台（"windows" / "macos" / "linux"），由后端 get_platform 命令返回。
 const platform = ref<string>("windows");
-const logs = ref<string[]>([]);
+
+// —— 运行日志（结构化行：类型/时间/内容；展开、分页、错误复制） ——
+interface LogRow {
+  id: number;
+  ts: number;
+  kind: "system" | "error" | "info";
+  text: string;
+}
+/** 启发式分类：[系统] 前缀为系统消息；错误关键词命中为 error；其余 info。 */
+function classifyLog(text: string): LogRow["kind"] {
+  if (text.startsWith("[系统]")) return "system";
+  if (
+    /error|错误|失败|exception|panic|refused|EPERM|ECONN|EACCES|EADDRINUSE|fatal|status code [45]\d\d/i.test(
+      text,
+    )
+  ) {
+    return "error";
+  }
+  return "info";
+}
+let nextLogId = 0;
+function makeLogRow(text: string): LogRow {
+  return { id: ++nextLogId, ts: Date.now(), kind: classifyLog(text), text };
+}
+const logs = ref<LogRow[]>([]);
+// 日志窗口：默认渲染尾部 LOG_WINDOW 条；「加载更早」每次回退 LOG_PAGE 条。
+const LOG_WINDOW = 300;
+const LOG_PAGE = 300;
+const logHidden = ref(0);
+const logAutoScroll = ref(true);
+const expandedLogIds = ref<Set<number>>(new Set());
+const logBox = ref<HTMLElement | null>(null);
+
+/** 追加一条日志（live 事件 / 本地消息共用）；自动滚动只在贴底且开关打开时触发。 */
+function pushLogRow(text: string) {
+  logs.value.push(makeLogRow(text));
+  if (logs.value.length > 2500) {
+    const drop = logs.value.length - 2500;
+    logs.value.splice(0, drop);
+    logHidden.value = Math.max(0, logHidden.value - drop);
+  }
+  // 新行到来时若已展示到尾部，保持尾部窗口（不自动把旧行挤出视图）。
+  logHidden.value = Math.min(logHidden.value, Math.max(0, logs.value.length - LOG_WINDOW));
+  if (logAutoScroll.value) requestAnimationFrame(() => autoScrollIfPinned(true));
+}
+
+/** 日志视口是否贴底（留 48px 容差）；贴底才允许新行自动滚动。 */
+function isLogPinned(): boolean {
+  const el = logBox.value;
+  if (!el) return true;
+  return el.scrollHeight - el.scrollTop - el.clientHeight < 48;
+}
+function autoScrollIfPinned(force = false) {
+  if (!force && !isLogPinned()) return;
+  const el = logBox.value;
+  if (el) el.scrollTop = el.scrollHeight;
+}
+function logVisible(): LogRow[] {
+  return logs.value.slice(logHidden.value);
+}
+function logErrorRows(): LogRow[] {
+  return logs.value.filter((r) => r.kind === "error");
+}
+function toggleLogExpanded(id: number) {
+  const next = new Set(expandedLogIds.value);
+  if (next.has(id)) next.delete(id);
+  else next.add(id);
+  expandedLogIds.value = next;
+}
+/** 复制文本到系统剪贴板（走 Rust，跨 iframe 场景可靠），返回是否成功。 */
+async function copyText(text: string): Promise<boolean> {
+  if (!text) return false;
+  try {
+    await invoke("clipboard_write", { text });
+    showToast("已复制到剪贴板");
+    return true;
+  } catch {
+    return false;
+  }
+}
+/** 「复制到 AI」模板：版本信息 + 报错内容（按需求措辞）。 */
+function toAiPrompt(rows: LogRow[]): string {
+  const head =
+    `现在在使用 DSH，版本号 ${env.value?.dshVersion ?? "未知"}（鲸仔 v${
+      whalitoVer.value?.current ?? "未知"
+    }${whalitoVer.value?.testBuild ? " 测试版" : ""}·${platform.value}）。` +
+    "日志报错内容如下，请帮我排查并修复：\n\n";
+  const body = rows
+    .map((r) => `[${new Date(r.ts).toLocaleString()}] ${r.text}`)
+    .join("\n");
+  return head + body;
+}
+const haveErrors = computed(() => logErrorRows().length > 0);
+const whalitoUpdateAvailable = computed(
+  () => !!whalitoVer.value?.updateAvailable && !whalitoVer.value?.testBuild,
+);
+
 const busy = ref<string | null>(null);
 const error = ref<string>("");
 const notice = ref<string>("");
@@ -88,6 +184,8 @@ const showSettings = ref(false);
 const confirmingStop = ref(false);
 const autoRestartCount = ref(0);
 const MAX_AUTO_RESTART = 3;
+/** 连续自动重启失败（面板错误横幅可给出「更新鲸仔 / 插件管理」动作）。 */
+const autoRestartFailed = ref(false);
 
 // 插件市场（dsh-market）状态：bundles 判定 + installedOnce 标记。
 const marketInstalled = ref(false);
@@ -104,11 +202,11 @@ async function loadPlugins() {
 async function loadDshPaths() {
   const [user, system] = await Promise.all([
     invoke<DshPathView>("dsh_path_status", { level: "user" }).catch((e) => {
-      logs.value.push(`[系统] 读取用户级 PATH 状态失败：${typeof e === "string" ? e : String(e)}`);
+      pushLogRow(`[系统] 读取用户级 PATH 状态失败：${typeof e === "string" ? e : String(e)}`);
       return null;
     }),
     invoke<DshPathView>("dsh_path_status", { level: "system" }).catch((e) => {
-      logs.value.push(`[系统] 读取系统级 PATH 状态失败：${typeof e === "string" ? e : String(e)}`);
+      pushLogRow(`[系统] 读取系统级 PATH 状态失败：${typeof e === "string" ? e : String(e)}`);
       return null;
     }),
   ]);
@@ -132,6 +230,41 @@ async function syncMarket(force = false) {
     notice.value = msg;
     await loadMarketStatus();
     return msg;
+  });
+}
+
+// ============ 插件管理（应急保启动：禁用会打断 DSH 启动的插件） ============
+const pluginsBusy = ref<string | null>(null);
+
+/** 禁用/启用插件：写 cordis.patch.yml 覆盖行，重启服务器后生效。 */
+async function togglePluginEntry(row: WhalitoPluginEntry) {
+  pluginsBusy.value = row.id;
+  try {
+    const list = await wrap(
+      `正在${row.disabled ? "启用" : "禁用"}插件 ${row.name}…`,
+      () => invoke<WhalitoPluginEntry[]>("toggle_plugin", { id: row.id, enabled: row.disabled }),
+    );
+    if (list) {
+      plugins.value = list;
+      if (server.value.phase === "running" || server.value.phase === "external") {
+        notice.value = `插件 ${row.name} 已${row.disabled ? "启用" : "禁用"}，重启服务器后生效。`;
+      } else {
+        notice.value = `插件 ${row.name} 已${row.disabled ? "启用" : "禁用"}，下次启动服务器时生效。`;
+      }
+    }
+  } catch (e) {
+    error.value = typeof e === "string" ? e : String(e);
+  } finally {
+    pluginsBusy.value = null;
+  }
+}
+
+/** 滚动到「插件管理」卡片（启动失败引导入口用）。 */
+function focusPluginsCard() {
+  goPanel();
+  requestAnimationFrame(() => {
+    const el = document.getElementById("panel-plugins");
+    el?.scrollIntoView({ behavior: "smooth", block: "start" });
   });
 }
 
@@ -163,8 +296,10 @@ const currentUpdateNotice = ref<UpdateNotice | null>(null);
 
 // 视图：flow = 引导流程 / panel = 鲸仔管理后台 / embed = 内嵌页面
 const view = ref<"flow" | "panel" | "embed">("flow");
-const stage = ref<"detecting" | "node" | "dsh" | "server">("detecting");
+const stage = ref<"detecting" | "node" | "dsh" | "server" | "wizard-done">("detecting");
 const flowError = ref<string>("");
+/** true = 当前是「重新运行安装引导」的体检向导（完成不自动启动/嵌页）。 */
+const flowManual = ref(false);
 const installStage = ref<string>("");
 
 const embedNonce = ref(0);
@@ -321,7 +456,7 @@ async function installNode() {
     const r = await wrap("正在安装 Node.js…", () => invoke<EnvInfo>("install_node"));
     if (r) {
       env.value = r;
-      await runFlow();
+      await resumeFlow();
     }
   } finally {
     installingNode.value = false;
@@ -336,7 +471,7 @@ async function upgradeNode() {
     const r = await wrap("正在升级 Node.js…", () => invoke<EnvInfo>("upgrade_node"));
     if (r) {
       env.value = r;
-      await runFlow();
+      await resumeFlow();
     }
   } finally {
     installingNode.value = false;
@@ -351,7 +486,7 @@ async function installNodeNvm() {
     const r = await wrap("正在通过 nvm 安装 Node.js…", () => invoke<EnvInfo>("install_node_nvm"));
     if (r) {
       env.value = r;
-      await runFlow();
+      await resumeFlow();
     }
   } finally {
     installingNode.value = false;
@@ -374,7 +509,7 @@ async function switchNodeNvm() {
     );
     if (r) {
       env.value = r;
-      await runFlow();
+      await resumeFlow();
     }
   } finally {
     installingNode.value = false;
@@ -455,6 +590,46 @@ function openNoticeUrl() {
   if (n?.url) void invoke("open_url", { url: n.url }).catch(() => {});
 }
 
+// ============ 鲸仔更新（管理后台「关于」/ 启动失败修复入口） ============
+/** 检查鲸仔是否有可用更新（silent=true 时失败不打扰，仅更新状态）。 */
+async function checkWhalitoUpdateUi(silent = false) {
+  try {
+    const r = await invoke<WhalitoVersionInfo | null>("whalito_check_update");
+    if (r) whalitoVer.value = r;
+  } catch (e) {
+    if (!silent) {
+      error.value = `检查鲸仔更新失败：${typeof e === "string" ? e : String(e)}`;
+    }
+  }
+}
+
+/**
+ * 更新鲸仔：先弹 Rust 原生确认框（测试版会提示无更新资产），确认后进入
+ * 全屏「鲸仔更新中」并执行（命令末尾退出应用、由安装链重启，不 await）。
+ */
+function updateWhalitoNow() {
+  void invoke<boolean>("confirm_whalito_update")
+    .then((ok) => {
+      if (!ok) return;
+      whalitoUpdating.value = true;
+      whalitoUpdateMessage.value = "正在准备更新…";
+      invoke("whalito_apply_update", { skipConfirm: true }).then(
+        () => {
+          whalitoUpdating.value = false;
+          whalitoUpdateMessage.value = "";
+        },
+        (e) => {
+          whalitoUpdating.value = false;
+          whalitoUpdateMessage.value = "";
+          error.value = typeof e === "string" ? e : String(e);
+        },
+      );
+    })
+    .catch((e) => {
+      error.value = typeof e === "string" ? e : String(e);
+    });
+}
+
 async function installNodePortable() {
   confirmSwitchNode.value = false;
   installingNode.value = true;
@@ -468,7 +643,7 @@ async function installNodePortable() {
     if (r) {
       env.value = r;
       settings.value = await invoke<Settings>("get_settings");
-      await runFlow();
+      await resumeFlow();
     }
   } finally {
     installingNode.value = false;
@@ -644,7 +819,7 @@ function onPanelContextMenu(e: MouseEvent) {
 
 // ============ 下载提示 ============
 /** 弹提示，durationMs 后自动消失；重复提示重置计时。下载提示默认 8s，复制提示 2s。 */
-function showToast(text: string, path: string, durationMs = 8000) {
+function showToast(text: string, path = "", durationMs = 8000) {
   toast.value = { text, path };
   if (toastTimer !== undefined) window.clearTimeout(toastTimer);
   toastTimer = window.setTimeout(() => {
@@ -780,7 +955,7 @@ async function processWhalitoMessage(msg: WhalitoMessage, eventOrigin: string) {
   if (msg.type === "ping") {
     if (!whalitoPingLogged) {
       whalitoPingLogged = true;
-      logs.value.push("[系统] 鲸仔设置分区已连接（收到内嵌页握手请求）");
+      pushLogRow("[系统] 鲸仔设置分区已连接（收到内嵌页握手请求）");
       invoke("bridge_diag", { line: `收到 ping，origin=${eventOrigin}` }).catch(() => {});
     }
     await loadPlugins();
@@ -1097,11 +1272,46 @@ async function processWhalitoMessage(msg: WhalitoMessage, eventOrigin: string) {
 }
 
 async function refreshLogs() {
-  logs.value = await invoke<string[]>("get_logs");
+  const raw = await invoke<string[]>("get_logs").catch(() => [] as string[]);
+  logs.value = raw.map((text) => makeLogRow(text));
+  logHidden.value = Math.max(0, logs.value.length - LOG_WINDOW);
+  requestAnimationFrame(() => autoScrollIfPinned(true));
 }
 
 function clearLogs() {
   logs.value = [];
+  logHidden.value = 0;
+  expandedLogIds.value = new Set();
+}
+
+/** 加载更早：回退一页。 */
+function loadEarlierLogs() {
+  logHidden.value = Math.max(0, logHidden.value - LOG_PAGE);
+}
+
+/** 复制所有错误行（时间 + 内容）。 */
+async function copyErrors() {
+  const rows = logErrorRows();
+  if (!rows.length) return;
+  await copyText(rows.map((r) => `[${fmtTime(r.ts)}] ${r.text}`).join("\n"));
+}
+
+/** 复制错误日志到 AI（带版本上下文提示词）。 */
+async function copyErrorsToAi() {
+  const rows = logErrorRows();
+  if (!rows.length) return;
+  await copyText(toAiPrompt(rows));
+}
+
+function fmtTime(ts: number): string {
+  const d = new Date(ts);
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+
+/** 单行复制 / 复制到 AI（供日志行按钮使用）。 */
+async function copyLogRow(row: LogRow, toAi: boolean) {
+  await copyText(toAi ? toAiPrompt([row]) : row.text);
 }
 
 async function loadSettings() {
@@ -1158,6 +1368,7 @@ async function checkLatest() {
 
 /** 主流程编排：检测 → 装 Node / 装 dsh / 启动服务器 → 内嵌打开。 */
 async function runFlow() {
+  flowManual.value = false;
   flowError.value = "";
   await refreshAll();
 
@@ -1190,7 +1401,9 @@ async function runFlow() {
   if (server.value.phase !== "running" && server.value.phase !== "external") {
     await startServer();
     if (server.value.phase !== "running") {
-      flowError.value = "服务器启动失败，请重试或进入鲸仔管理后台查看日志。";
+      flowError.value = "服务器启动失败，请重试；仍失败可「尝试更新鲸仔」或在管理后台禁用插件。";
+      // 静默探测鲸仔更新，有新版本则错误卡显示「尝试更新鲸仔」。
+      void checkWhalitoUpdateUi(true);
       return;
     }
   }
@@ -1203,16 +1416,84 @@ async function runFlow() {
   }
 }
 
+/**
+ * 「重新运行安装引导」（关于）：环境体检向导，只检测/安装，**不自动启动
+ * 服务器、不内嵌跳转**；结束后停在结果卡，由用户选择启动或返回。
+ */
+async function runWizard() {
+  flowManual.value = true;
+  flowError.value = "";
+  autoRestartFailed.value = false;
+  view.value = "flow";
+  await refreshAll();
+
+  const e = env.value;
+  if (!e) {
+    stage.value = "detecting";
+    flowError.value = "环境检测失败，请重试。";
+    return;
+  }
+  if (!e.found || e.nodeTooOld) {
+    // Node 缺失/过低：进入安装卡片；完成后 resumeFlow 续跑本向导。
+    stage.value = "node";
+    return;
+  }
+  if (!e.dshInstalled) {
+    stage.value = "dsh";
+    await installDsh();
+    await refreshEnv();
+    if (!env.value?.dshInstalled) {
+      stage.value = "detecting";
+      flowError.value = "DeepSeek Harness 安装未完成，请重试或查看日志。";
+      return;
+    }
+  }
+  await refreshStatus();
+  stage.value = "wizard-done";
+}
+
+/** Node 安装/切换等子流程完成后，按来源续跑：向导 → runWizard，引导 → runFlow。 */
+function resumeFlow() {
+  if (flowManual.value) void runWizard();
+  else void runFlow();
+}
+
+/** 向导结果卡的「启动服务器」：启动后留在结果卡（不内嵌跳转）。 */
+async function startFromWizard() {
+  await startServer();
+  await refreshStatus();
+}
+
+/** 向导里的「重新安装 / 修复 Harness」：走既有更新链路（备份确认 → 停服 →
+ * 下载安装 → 重启），完成后回到结果卡；失败把错误留在结果卡上。 */
+async function repairDshFromWizard() {
+  const confirmed = await invoke<boolean>("confirm_dsh_update").catch(() => false);
+  if (!confirmed) return;
+  installingDsh.value = true;
+  dshUpdateMessage.value = "正在重新安装 DeepSeek Harness…";
+  try {
+    await performDshUpdate();
+  } catch (e) {
+    flowError.value = `重新安装失败：${typeof e === "string" ? e : String(e)}`;
+  } finally {
+    installingDsh.value = false;
+    await refreshAll();
+    await refreshStatus();
+    if (env.value?.dshInstalled) stage.value = "wizard-done";
+    else stage.value = "detecting";
+  }
+}
+
 function goPanel() {
   view.value = "panel";
+  flowManual.value = false;
+  autoRestartFailed.value = false;
 }
 
 onMounted(async () => {
   unlisteners.push(
     await listen<string>("log", (e) => {
-      logs.value.push(e.payload);
-      if (logs.value.length > 2000) logs.value.splice(0, logs.value.length - 2000);
-      autoScroll();
+      pushLogRow(e.payload);
     }),
   );
   unlisteners.push(
@@ -1248,18 +1529,21 @@ onMounted(async () => {
       server.value = await invoke<ServerStatus>("server_status");
       if (settings.value?.autoRestart && autoRestartCount.value < MAX_AUTO_RESTART) {
         autoRestartCount.value += 1;
-        logs.value.push(
+        pushLogRow(
           `[系统] 服务器异常退出，自动重启（第 ${autoRestartCount.value}/${MAX_AUTO_RESTART} 次）`,
         );
         const r = await invoke<ServerStatus>("start_server").catch(() => null);
         if (r) server.value = r;
       } else if (autoRestartCount.value >= MAX_AUTO_RESTART) {
-        error.value = `服务器连续 ${MAX_AUTO_RESTART} 次启动失败，已停止自动重试。请查看日志或重新安装 Harness。`;
+        error.value = `服务器连续 ${MAX_AUTO_RESTART} 次启动失败，已停止自动重试。可在下方「尝试更新鲸仔」或「插件管理」中修复。`;
+        autoRestartFailed.value = true;
+        // 静默探测鲸仔更新，有新版本则在面板错误横幅旁给出更新按钮。
+        void checkWhalitoUpdateUi(true);
         // 桌宠同步提醒（即使主窗口在托盘/后台，桌宠气泡也可见）。
         void emit("pet-alert", {
           kind: "system",
           key: "server-restart-failed",
-          text: `服务器连续 ${MAX_AUTO_RESTART} 次启动失败，已停止自动重试。点击打开面板查看日志。`,
+          text: `服务器连续 ${MAX_AUTO_RESTART} 次启动失败，已停止自动重试。可尝试更新鲸仔或禁用插件后再启动。`,
         });
       }
     }),
@@ -1371,13 +1655,6 @@ watch(view, () => {
 
 // 更新进行中 / 忙碌结束时补弹排队中的更新提示。
 watch([installingDsh, whalitoUpdating, busy], maybeShowUpdateNotice);
-
-const logBox = ref<HTMLElement | null>(null);
-function autoScroll() {
-  requestAnimationFrame(() => {
-    if (logBox.value) logBox.value.scrollTop = logBox.value.scrollHeight;
-  });
-}
 </script>
 
 <template>
@@ -1443,7 +1720,17 @@ function autoScroll() {
             <p class="flow-title">操作未完成</p>
             <p class="banner error">{{ flowError }}</p>
             <div class="flow-actions">
-              <button class="primary" @click="runFlow">重试</button>
+              <button class="primary" @click="resumeFlow">重试</button>
+              <!-- 启动失败等事故场景：优先引导「更新鲸仔」与「禁用插件」恢复 -->
+              <button
+                v-if="whalitoUpdateAvailable"
+                class="primary"
+                :disabled="whalitoUpdating"
+                @click="updateWhalitoNow"
+              >
+                尝试更新鲸仔
+              </button>
+              <button class="ghost" @click="focusPluginsCard">管理插件（禁用异常插件）</button>
               <button class="ghost" @click="goPanel">进入鲸仔管理后台</button>
             </div>
           </template>
@@ -1518,6 +1805,52 @@ function autoScroll() {
             </p>
           </template>
 
+          <!-- 体检向导结果（「重新运行安装引导」）：只检测/修复，不自动启动与嵌页 -->
+          <template v-else-if="stage === 'wizard-done'">
+            <p class="flow-title">环境体检完成</p>
+            <div class="wizard-report">
+              <p>
+                <span class="hint">Node.js：</span>
+                <b>{{ env?.version ?? "—" }}</b>
+              </p>
+              <p>
+                <span class="hint">DeepSeek Harness：</span>
+                <b>{{ env?.dshVersion ?? "未安装" }}</b>
+              </p>
+              <p>
+                <span class="hint">服务器：</span>
+                <b :class="server.phase === 'running' ? 'good' : 'warn'">
+                  {{
+                    server.phase === "running"
+                      ? "运行中"
+                      : server.phase === "external"
+                        ? "外部运行中"
+                        : "未运行"
+                  }}
+                </b>
+              </p>
+            </div>
+            <p v-if="installingDsh" class="banner busy">⏳ {{ dshUpdateMessage || "正在重新安装…" }}</p>
+            <div class="flow-actions">
+              <button
+                v-if="server.phase !== 'running' && server.phase !== 'external'"
+                class="primary"
+                :disabled="installingDsh || busy !== null"
+                @click="startFromWizard"
+              >
+                启动服务器
+              </button>
+              <button class="ghost" :disabled="installingDsh" @click="repairDshFromWizard">
+                重新安装 / 修复 Harness
+              </button>
+              <button class="ghost" @click="goPanel">返回管理后台</button>
+            </div>
+            <p class="hint">
+              向导只做检测与安装/修复，不会自动启动服务器或跳转页面；启动后可在管理后台或
+              DSH 页面操作。
+            </p>
+          </template>
+
           <p v-if="busy" class="banner busy">⏳ {{ busy }}</p>
           <p v-if="error && !flowError" class="banner error">{{ error }}</p>
 
@@ -1567,6 +1900,21 @@ function autoScroll() {
       </div>
 
       <p v-if="error" class="banner error">{{ error }}</p>
+      <!-- 连续自动重启失败：给出「更新鲸仔 / 插件管理」两个恢复动作 -->
+      <div v-if="autoRestartFailed" class="row fix-row">
+        <button
+          v-if="whalitoUpdateAvailable"
+          class="primary small"
+          :disabled="whalitoUpdating"
+          @click="updateWhalitoNow"
+        >
+          {{ whalitoUpdating ? "正在更新…" : `尝试更新鲸仔到 v${whalitoVer?.latest}` }}
+        </button>
+        <button v-else class="ghost small" :disabled="whalitoUpdating" @click="checkWhalitoUpdateUi()">
+          检查鲸仔更新
+        </button>
+        <button class="ghost small" @click="focusPluginsCard">管理插件（禁用异常插件）</button>
+      </div>
       <p v-if="notice" class="banner notice">{{ notice }}</p>
       <p v-if="busy" class="banner busy">⏳ {{ busy }}</p>
 
@@ -1609,6 +1957,57 @@ function autoScroll() {
           重新安装
         </button>
       </div>
+
+      <!-- 插件管理：禁用可能打断 DSH 启动的插件（bundle 层，含市场安装的）。
+           禁用≠卸载：只写 disabled 覆盖行，重新启用即恢复；改动重启后生效。 -->
+      <section id="panel-plugins" class="card plugins">
+        <div class="plugins-head">
+          <h2>插件管理</h2>
+          <button
+            v-if="server.phase === 'running' || server.phase === 'external'"
+            class="ghost small"
+            @click="restartServer"
+          >
+            重启服务器（使改动生效）
+          </button>
+        </div>
+        <p class="hint">
+          插件市场安装的插件可能导致 DSH 启动失败；DSH 起不来时可在此先禁用再重启，保障服务优先可用。禁用≠卸载。
+        </p>
+        <div v-if="plugins.length === 0" class="empty">暂无已安装插件</div>
+        <div v-for="p in plugins" :key="p.id" class="plugin-row">
+          <div class="plugin-info">
+            <span class="plugin-name">
+              {{ p.name }}
+              <span v-if="p.builtin" class="badge-soft">内置</span>
+            </span>
+            <span class="hint plugin-desc">{{ p.description }}</span>
+          </div>
+          <div class="plugin-actions">
+            <span v-if="p.installable && !p.installed" class="hint">未安装</span>
+            <span v-else class="hint" :class="p.disabled ? 'warn' : 'good'">
+              {{ p.disabled ? "已禁用（重启后不加载）" : "加载中" }}
+            </span>
+            <button
+              v-if="p.installable && !p.installed"
+              class="ghost small"
+              :disabled="!!busy"
+              @click="syncMarket(true)"
+            >
+              安装
+            </button>
+            <button
+              v-else-if="!p.builtin"
+              class="ghost small"
+              :disabled="pluginsBusy === p.id || !!busy"
+              @click="togglePluginEntry(p)"
+            >
+              {{ pluginsBusy === p.id ? "处理中…" : p.disabled ? "启用" : "禁用" }}
+            </button>
+            <span v-else class="hint">鲸仔入口，不提供禁用</span>
+          </div>
+        </div>
+      </section>
 
       <div v-if="showSettings && settings" class="modal-backdrop" @click.self="showSettings = false">
         <div class="modal">
@@ -1680,15 +2079,80 @@ function autoScroll() {
 
       <section class="card logs">
         <div class="logs-head">
-          <h2>运行日志<span v-if="logs.length" class="logs-count">（共 {{ logs.length }} 条）</span></h2>
-          <div class="row">
+          <h2>
+            运行日志
+            <span v-if="logs.length" class="logs-count">
+              （共 {{ logs.length }} 条<span v-if="logHidden > 0">，显示后 {{ logs.length - logHidden }} 条</span>）
+            </span>
+          </h2>
+          <div class="row logs-tools">
+            <label class="check small-check">
+              <input v-model="logAutoScroll" type="checkbox" />
+              <span>自动滚动</span>
+            </label>
+            <button
+              class="ghost small"
+              :disabled="!haveErrors"
+              @click="copyErrors"
+              title="把全部错误日志复制到剪贴板"
+            >
+              复制错误
+            </button>
+            <button
+              class="ghost small"
+              :disabled="!haveErrors"
+              @click="copyErrorsToAi"
+              title="带版本信息的排障提示词，可直接粘贴给 AI"
+            >
+              复制到 AI
+            </button>
             <button class="ghost small" @click="refreshLogs">刷新</button>
             <button class="ghost small" @click="clearLogs">清空</button>
           </div>
         </div>
         <div ref="logBox" class="logbox">
           <div v-if="logs.length === 0" class="empty">暂无日志</div>
-          <div v-for="(l, i) in logs" :key="i" class="line">{{ l }}</div>
+          <template v-else>
+            <button
+              v-if="logHidden > 0"
+              class="ghost small logs-earlier"
+              @click="loadEarlierLogs"
+            >
+              加载更早（还有 {{ logHidden }} 条）
+            </button>
+            <div
+              v-for="l in logVisible()"
+              :key="l.id"
+              class="log-row"
+              :class="[`kind-${l.kind}`, { expanded: expandedLogIds.has(l.id) }]"
+              @click="toggleLogExpanded(l.id)"
+            >
+              <span class="log-badge">{{ l.kind === "system" ? "系统" : l.kind === "error" ? "错误" : "信息" }}</span>
+              <span class="log-time">{{ fmtTime(l.ts) }}</span>
+              <span class="log-text">{{ l.text }}</span>
+              <span class="log-actions" @click.stop>
+                <button
+                  v-if="l.kind === 'error'"
+                  type="button"
+                  class="ghost small"
+                  @click="copyLogRow(l, false)"
+                  title="复制该行内容"
+                >
+                  复制
+                </button>
+                <button
+                  v-if="l.kind === 'error'"
+                  type="button"
+                  class="ghost small"
+                  @click="copyLogRow(l, true)"
+                  title="该行 + 版本信息，生成排障提示词"
+                >
+                  复制到 AI
+                </button>
+                <span class="log-expand-hint">{{ expandedLogIds.has(l.id) ? "收起" : "展开" }}</span>
+              </span>
+            </div>
+          </template>
         </div>
       </section>
 
@@ -1697,10 +2161,28 @@ function autoScroll() {
           <h2>关于</h2>
           <span class="about-version">
             鲸仔 Whalito v{{ whalitoVer?.current ?? "—" }}{{ whalitoVer?.testBuild ? "（测试版）" : "" }}
+            <span v-if="whalitoUpdateAvailable" class="badge-soft">
+              可更新至 v{{ whalitoVer?.latest }}
+            </span>
           </span>
         </div>
+        <div class="about-versions">
+          <span class="hint">DeepSeek Harness：v{{ env?.dshVersion ?? "未安装" }}</span>
+          <span class="hint">通道：{{ settings?.dshChannel === "next" ? "预发布（next）" : "稳定（latest）" }}</span>
+        </div>
         <div class="row">
-          <button class="primary" @click="runFlow">重新运行安装引导</button>
+          <button class="primary" @click="runWizard">重新运行安装引导</button>
+          <button class="ghost" :disabled="whalitoUpdating" @click="checkWhalitoUpdateUi()">
+            检查鲸仔更新
+          </button>
+          <button
+            v-if="whalitoUpdateAvailable"
+            class="primary"
+            :disabled="whalitoUpdating"
+            @click="updateWhalitoNow"
+          >
+            更新鲸仔到 v{{ whalitoVer?.latest }}
+          </button>
           <button
             class="ghost"
             @click="invoke('open_url', { url: 'https://github.com/entireyu/dsh-whalito-desk' }).catch(() => {})"
