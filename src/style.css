@@ -525,7 +525,7 @@ button.small {
   gap: 8px;
   padding: 3px 4px;
   border-radius: 4px;
-  cursor: pointer;
+  cursor: default;
   color: var(--muted);
 }
 .log-row:hover {
@@ -591,6 +591,20 @@ button.small {
   font-size: 11px;
   opacity: 0.6;
   margin-left: 2px;
+}
+.log-toggle {
+  border: none;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-size: 11px;
+  opacity: 0.6;
+  padding: 0 2px;
+  cursor: pointer;
+}
+.log-toggle:hover {
+  opacity: 1;
+  text-decoration: underline;
 }
 
 /* —— 插件管理卡片 —— */
@@ -1025,13 +1039,39 @@ button.link {
   margin-top: 2px;
 }
 
-/* —— 管理后台双栏布局：主栏=运行日志，侧栏=市场/插件管理/关于 —— */
+/* —— 管理后台布局：顶部（状态卡+操作/插件并排）+ 双栏（日志主栏 / 市场·关于侧栏） —— */
+.panel-top {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+.panel-top-status {
+  display: grid;
+  gap: 12px;
+  align-content: start;
+}
+.panel-top-actions {
+  display: grid;
+  gap: 12px;
+  align-content: start;
+}
+/* 操作按钮竖排、满宽，和三张状态卡并排观感一致 */
+.panel-top-actions .server-tools {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+}
+.panel-top-actions .server-tools > button {
+  width: 100%;
+}
+
 .panel-grid {
   display: grid;
   grid-template-columns: minmax(0, 1.45fr) minmax(0, 1fr);
   grid-template-areas:
     "logs market"
-    "logs plugins"
     "logs about";
   gap: 16px;
   align-items: start;
@@ -1042,9 +1082,6 @@ button.link {
 .panel-area-market {
   grid-area: market;
 }
-.panel-area-plugins {
-  grid-area: plugins;
-}
 .panel-area-about {
   grid-area: about;
 }
@@ -1053,12 +1090,14 @@ button.link {
   margin-bottom: 0;
 }
 @media (max-width: 900px) {
+  .panel-top,
   .panel-grid {
     grid-template-columns: 1fr;
+  }
+  .panel-grid {
     grid-template-areas:
       "logs"
       "market"
-      "plugins"
       "about";
   }
 }

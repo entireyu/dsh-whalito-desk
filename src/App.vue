@@ -1924,16 +1924,87 @@ watch([installingDsh, whalitoUpdating, busy], maybeShowUpdateNotice);
         </div>
       </header>
 
-      <!-- 状态总览：Node / Harness / 服务器 一眼看清 -->
-      <div class="overview">
-        <div
-          v-for="item in overviewItems"
-          :key="item.label"
-          class="overview-item"
-          :class="item.state"
-        >
-          <span class="overview-title">{{ item.label }}</span>
-          <span class="overview-value">{{ item.text }}</span>
+      <!-- 顶部：左侧三张状态卡（竖排），右侧操作按钮 + 插件管理（竖排、并排显示） -->
+      <div class="panel-top">
+        <div class="panel-top-status">
+          <div
+            v-for="item in overviewItems"
+            :key="item.label"
+            class="overview-item"
+            :class="item.state"
+          >
+            <span class="overview-title">{{ item.label }}</span>
+            <span class="overview-value">{{ item.text }}</span>
+          </div>
+        </div>
+        <div class="panel-top-actions">
+          <!-- 服务器操作工具栏（竖排） -->
+          <div class="server-tools">
+            <button v-if="server.phase === 'stopped'" class="primary" @click="startServer">启动服务器</button>
+            <button v-else-if="server.phase === 'error'" class="primary" @click="startServer">重新启动</button>
+            <button v-else class="danger" @click="stopServer">
+              {{ server.phase === "external" && confirmingStop ? "再次点击确认停止" : "停止服务器" }}
+            </button>
+            <button v-if="server.phase === 'external' && confirmingStop" class="ghost" @click="confirmingStop = false">取消</button>
+            <button v-if="server.phase === 'running' || server.phase === 'external'" class="ghost" @click="restartServer">重启服务器</button>
+            <button v-if="server.url" class="primary" @click="openEmbedded">应用内打开</button>
+            <button v-if="server.url" @click="openUrl">在浏览器打开</button>
+            <button v-if="server.url" @click="copyServerUrl">复制地址</button>
+          </div>
+          <p v-if="server.phase === 'external'" class="hint warn">
+            该服务器由外部启动；点击「停止服务器」将按端口定位并结束对应进程（需二次确认）。
+          </p>
+
+          <!-- 插件管理：禁用可能打断 DSH 启动的插件（bundle 层，含市场安装的）。
+               禁用≠卸载：只写 disabled 覆盖行，重新启用即恢复；改动重启后生效。 -->
+          <section id="panel-plugins" class="card plugins">
+            <div class="plugins-head">
+              <h2>插件管理</h2>
+              <button
+                v-if="server.phase === 'running' || server.phase === 'external'"
+                class="ghost small"
+                @click="restartServer"
+              >
+                重启服务器（使改动生效）
+              </button>
+            </div>
+            <p class="hint">
+              插件市场安装的插件可能导致 DSH 启动失败；DSH 起不来时可在此先禁用再重启，保障服务优先可用。禁用≠卸载。
+            </p>
+            <div v-if="plugins.length === 0" class="empty">暂无已安装插件</div>
+            <div v-for="p in plugins" :key="p.id" class="plugin-row">
+              <div class="plugin-info">
+                <span class="plugin-name">
+                  {{ p.name }}
+                  <span v-if="p.builtin" class="badge-soft">内置</span>
+                </span>
+                <span class="hint plugin-desc">{{ p.description }}</span>
+              </div>
+              <div class="plugin-actions">
+                <span v-if="p.installable && !p.installed" class="hint">未安装</span>
+                <span v-else class="hint" :class="p.disabled ? 'warn' : 'good'">
+                  {{ p.disabled ? "已禁用（重启后不加载）" : "已启用" }}
+                </span>
+                <button
+                  v-if="p.installable && !p.installed"
+                  class="ghost small"
+                  :disabled="!!busy"
+                  @click="syncMarket(true)"
+                >
+                  安装
+                </button>
+                <button
+                  v-else-if="!p.builtin"
+                  class="ghost small"
+                  :disabled="pluginsBusy === p.id || !!busy"
+                  @click="togglePluginEntry(p)"
+                >
+                  {{ pluginsBusy === p.id ? "处理中…" : p.disabled ? "启用" : "禁用" }}
+                </button>
+                <span v-else class="hint">鲸仔入口，不提供禁用</span>
+              </div>
+            </div>
+          </section>
         </div>
       </div>
 
@@ -1961,24 +2032,7 @@ watch([installingDsh, whalitoUpdating, busy], maybeShowUpdateNotice);
       <p v-if="notice" class="banner notice">{{ notice }}</p>
       <p v-if="busy" class="banner busy">⏳ {{ busy }}</p>
 
-      <!-- 服务器操作工具栏（去卡片化后保留的高频操作） -->
-      <div class="server-tools">
-        <button v-if="server.phase === 'stopped'" class="primary" @click="startServer">启动服务器</button>
-        <button v-else-if="server.phase === 'error'" class="primary" @click="startServer">重新启动</button>
-        <button v-else class="danger" @click="stopServer">
-          {{ server.phase === "external" && confirmingStop ? "再次点击确认停止" : "停止服务器" }}
-        </button>
-        <button v-if="server.phase === 'external' && confirmingStop" class="ghost" @click="confirmingStop = false">取消</button>
-        <button v-if="server.phase === 'running' || server.phase === 'external'" class="ghost" @click="restartServer">重启服务器</button>
-        <button v-if="server.url" class="primary" @click="openEmbedded">应用内打开</button>
-        <button v-if="server.url" @click="openUrl">在浏览器打开</button>
-        <button v-if="server.url" @click="copyServerUrl">复制地址</button>
-      </div>
-      <p v-if="server.phase === 'external'" class="hint warn">
-        该服务器由外部启动；点击「停止服务器」将按端口定位并结束对应进程（需二次确认）。
-      </p>
-
-      <!-- 双栏：主栏=运行日志；侧栏=插件市场 / 插件管理 / 关于（紧凑卡片） -->
+      <!-- 双栏：主栏=运行日志；侧栏=插件市场 / 关于 -->
       <div class="panel-grid">
       <!-- 插件市场（dsh-market）：启动前自动预装，这里可手动检查 / 显式重装 -->
       <div class="market-row panel-area-market">
@@ -2002,57 +2056,6 @@ watch([installingDsh, whalitoUpdating, busy], maybeShowUpdateNotice);
           重新安装
         </button>
       </div>
-
-      <!-- 插件管理：禁用可能打断 DSH 启动的插件（bundle 层，含市场安装的）。
-           禁用≠卸载：只写 disabled 覆盖行，重新启用即恢复；改动重启后生效。 -->
-      <section id="panel-plugins" class="card plugins panel-area-plugins">
-        <div class="plugins-head">
-          <h2>插件管理</h2>
-          <button
-            v-if="server.phase === 'running' || server.phase === 'external'"
-            class="ghost small"
-            @click="restartServer"
-          >
-            重启服务器（使改动生效）
-          </button>
-        </div>
-        <p class="hint">
-          插件市场安装的插件可能导致 DSH 启动失败；DSH 起不来时可在此先禁用再重启，保障服务优先可用。禁用≠卸载。
-        </p>
-        <div v-if="plugins.length === 0" class="empty">暂无已安装插件</div>
-        <div v-for="p in plugins" :key="p.id" class="plugin-row">
-          <div class="plugin-info">
-            <span class="plugin-name">
-              {{ p.name }}
-              <span v-if="p.builtin" class="badge-soft">内置</span>
-            </span>
-            <span class="hint plugin-desc">{{ p.description }}</span>
-          </div>
-          <div class="plugin-actions">
-            <span v-if="p.installable && !p.installed" class="hint">未安装</span>
-            <span v-else class="hint" :class="p.disabled ? 'warn' : 'good'">
-              {{ p.disabled ? "已禁用（重启后不加载）" : "加载中" }}
-            </span>
-            <button
-              v-if="p.installable && !p.installed"
-              class="ghost small"
-              :disabled="!!busy"
-              @click="syncMarket(true)"
-            >
-              安装
-            </button>
-            <button
-              v-else-if="!p.builtin"
-              class="ghost small"
-              :disabled="pluginsBusy === p.id || !!busy"
-              @click="togglePluginEntry(p)"
-            >
-              {{ pluginsBusy === p.id ? "处理中…" : p.disabled ? "启用" : "禁用" }}
-            </button>
-            <span v-else class="hint">鲸仔入口，不提供禁用</span>
-          </div>
-        </div>
-      </section>
 
       <div v-if="showSettings && settings" class="modal-backdrop" @click.self="showSettings = false">
         <div class="modal">
@@ -2170,7 +2173,6 @@ watch([installingDsh, whalitoUpdating, busy], maybeShowUpdateNotice);
               :key="l.id"
               class="log-row"
               :class="[`kind-${l.kind}`, { expanded: expandedLogIds.has(l.id) }]"
-              @click="toggleLogExpanded(l.id)"
             >
               <span class="log-badge">{{ l.kind === "system" ? "系统" : l.kind === "error" ? "错误" : "信息" }}</span>
               <span class="log-time">{{ fmtTime(l.ts) }}</span>
@@ -2194,7 +2196,13 @@ watch([installingDsh, whalitoUpdating, busy], maybeShowUpdateNotice);
                 >
                   复制到 AI
                 </button>
-                <span class="log-expand-hint">{{ expandedLogIds.has(l.id) ? "收起" : "展开" }}</span>
+                <button
+                  type="button"
+                  class="log-toggle"
+                  @click="toggleLogExpanded(l.id)"
+                >
+                  {{ expandedLogIds.has(l.id) ? "收起" : "展开" }}
+                </button>
               </span>
             </div>
           </template>
